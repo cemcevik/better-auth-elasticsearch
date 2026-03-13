@@ -63,5 +63,8 @@ jobs:
           git add package.json
           git commit -m "chore: bump version [skip ci]"
           git push
-      - name: Publish to pnpm
-        run: pnpm publish --provenance --access public
+      - name: Publish to npm
+        run: pnpm -r publish --access public --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true

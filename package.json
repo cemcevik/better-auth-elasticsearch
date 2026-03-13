@@ -28,10 +28,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/cemcevik/better-auth-elasticsearch.git"
-  },
-  "bugs": {
-    "url": "https://github.com/cemcevik/better-auth-elasticsearch/issues"
+    "url": "git+https://github.com/cemcevik/better-auth-elasticsearch.git"
   },
   "homepage": "https://github.com/cemcevik/better-auth-elasticsearch#readme",
   "engines": {
