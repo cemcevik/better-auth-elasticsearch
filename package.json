@@ -1,6 +1,6 @@
 {
   "name": "@cemcevik/better-auth-elasticsearch",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Elasticsearch adapter for Better Auth",
   "type": "module",
   "main": "./dist/index.js",
