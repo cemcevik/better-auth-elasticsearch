@@ -1,0 +1,63 @@
+{
+  "name": "@cemcevik/better-auth-elasticsearch",
+  "version": "0.1.0",
+  "description": "Elasticsearch adapter for Better Auth",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "BETTER_AUTH_FORCE_ELASTIC_TESTS=true vitest run test/elasticsearch-adapter.test.mjs",
+    "lint": "biome check .",
+    "lint:fix": "biome check . --write",
+    "format": "biome format . --write",
+    "check": "pnpm lint && pnpm typecheck && pnpm test"
+  },
+  "keywords": [
+    "better-auth",
+    "elasticsearch",
+    "adapter",
+    "auth"
+  ],
+  "author": "cemcevik",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cemcevik/better-auth-elasticsearch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cemcevik/better-auth-elasticsearch/issues"
+  },
+  "homepage": "https://github.com/cemcevik/better-auth-elasticsearch#readme",
+  "engines": {
+    "node": ">=22"
+  },
+  "peerDependencies": {
+    "@elastic/elasticsearch": "^9.3.4",
+    "better-auth": "^1.4.21"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^24.8.1",
+    "@elastic/elasticsearch": "^9.3.4",
+    "better-auth": "1.4.21",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "packageManager": "pnpm@10.11.1"
+}
