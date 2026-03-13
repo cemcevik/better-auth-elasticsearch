@@ -70,8 +70,9 @@ describe.skipIf(!hasElasticEnv && !forceElasticTests)(
 
     runAdapterTest({
       getAdapter: async (betterAuthOptions = {}) => {
-        const { elasticsearchAdapter } =
-          await import("../src/elasticsearch-adapter");
+        const { elasticsearchAdapter } = await import(
+          "../src/elasticsearch-adapter"
+        );
 
         const adapterFactory = elasticsearchAdapter({
           client,
