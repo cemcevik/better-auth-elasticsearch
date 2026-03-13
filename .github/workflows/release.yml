@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    services:
+      elasticsearch:
+        image: docker.elastic.co/elasticsearch/elasticsearch:8.17.2
+        env:
+          discovery.type: single-node
+          xpack.security.enabled: "false"
+          ES_JAVA_OPTS: -Xms512m -Xmx512m
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd="curl -fs http://localhost:9200/_cluster/health || exit 1"
+          --health-interval=10s
+          --health-timeout=10s
+          --health-retries=30
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org/
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Build
+        run: pnpm build
+      - name: Integration tests
+        env:
+          ELASTICSEARCH_URL: http://127.0.0.1:9200
+          BETTER_AUTH_FORCE_ELASTIC_TESTS: "true"
+        run: pnpm test:integration
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Bump patch version
+        run: pnpm version patch --no-git-tag-version
+      - name: Commit version bump
+        run: |
+          git add package.json
+          git commit -m "chore: bump version [skip ci]"
+          git push
+      - name: Read package version
+        id: pkg
+        run: |
+          echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+      - name: Check if version exists on npm
+        id: version_check
+        run: |
+          if npm view @cemcevik/better-auth-elasticsearch@${{ steps.pkg.outputs.version }} version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Publish to npm
+        if: steps.version_check.outputs.exists == 'false'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm publish --no-git-checks --access public
+      - name: Skip publish (already exists)
+        if: steps.version_check.outputs.exists == 'true'
+        run: echo "Version already exists on npm. Skipping publish."
