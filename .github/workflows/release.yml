@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       elasticsearch:
-        image: docker.elastic.co/elasticsearch/elasticsearch:8.17.2
+        image: docker.elastic.co/elasticsearch/elasticsearch:9.3.1
         env:
           discovery.type: single-node
           xpack.security.enabled: "false"
