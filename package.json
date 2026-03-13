@@ -1,6 +1,6 @@
 {
   "name": "@cemcevik/better-auth-elasticsearch",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Elasticsearch adapter for Better Auth",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,9 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -23,7 +25,12 @@
     "format": "biome format . --write",
     "check": "pnpm lint && pnpm typecheck && pnpm test"
   },
-  "keywords": ["better-auth", "elasticsearch", "adapter", "auth"],
+  "keywords": [
+    "better-auth",
+    "elasticsearch",
+    "adapter",
+    "auth"
+  ],
   "author": "cemcevik",
   "license": "Apache-2.0",
   "repository": {
