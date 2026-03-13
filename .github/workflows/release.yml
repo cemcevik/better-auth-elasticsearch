@@ -37,8 +37,6 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
           cache: pnpm
-      - name: Ensure pnpm is installed
-        run: npm install -g pnpm@latest
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Lint
@@ -66,4 +64,4 @@ jobs:
           git commit -m "chore: bump version [skip ci]"
           git push
       - name: Publish to pnpm
-        run: pnpm publish
+        run: pnpm publish --provenance --access public
