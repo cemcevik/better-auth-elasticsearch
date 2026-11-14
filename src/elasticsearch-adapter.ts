@@ -76,9 +76,6 @@ for (entry in params.fields.entrySet()) {
 /** How many rows `updateMany` reads and writes per request. */
 const UPDATE_MANY_PAGE_SIZE = 1000;
 
-/** How long Elasticsearch keeps `updateMany`'s search view between pages. */
-const UPDATE_MANY_KEEP_ALIVE = "1m";
-
 const normalizeHit = (hit: {
   _id?: string;
   _source?: SourceDoc;
@@ -546,70 +543,57 @@ export const elasticsearchAdapter = (
               : query;
             const conflictedIds: string[] = [];
 
-            // The point in time keeps paging stable while rows change.
-            const pointInTime = await withRetry(() =>
-              client.openPointInTime({
-                index,
-                keep_alive: UPDATE_MANY_KEEP_ALIVE,
-              }),
-            );
-            try {
-              let searchAfter: estypes.SortResults | undefined;
-              while (true) {
-                const page = await withRetry(() =>
-                  client.search({
-                    pit: {
-                      id: pointInTime.id,
-                      keep_alive: UPDATE_MANY_KEEP_ALIVE,
-                    },
-                    query: passQuery,
-                    size: UPDATE_MANY_PAGE_SIZE,
-                    sort: ["_shard_doc"],
-                    search_after: searchAfter,
-                    _source: false,
-                    seq_no_primary_term: true,
-                    track_total_hits: false,
-                  }),
-                );
-                const hits = page.hits.hits;
-                if (hits.length === 0) break;
-                searchAfter = hits[hits.length - 1]?.sort;
-
-                // Not retried, like the other conditional writes.
-                const result = await client.bulk({
+            // Paging by id needs no point in time: ids are unique and never
+            // change, so no row is read twice, and a row that changes on a
+            // later page is read as changed.
+            let searchAfter: estypes.SortResults | undefined;
+            while (true) {
+              const page = await withRetry(() =>
+                client.search({
                   index,
-                  refresh,
-                  operations: hits.flatMap((hit) => [
-                    {
-                      update: {
-                        _id: hit._id,
-                        if_seq_no: hit._seq_no,
-                        if_primary_term: hit._primary_term,
-                      },
+                  query: passQuery,
+                  size: UPDATE_MANY_PAGE_SIZE,
+                  sort: [{ id: "asc" }],
+                  search_after: searchAfter,
+                  _source: false,
+                  seq_no_primary_term: true,
+                  track_total_hits: false,
+                }),
+              );
+              const hits = page.hits.hits;
+              if (hits.length === 0) break;
+              searchAfter = hits[hits.length - 1]?.sort;
+
+              // Not retried, like the other conditional writes.
+              const result = await client.bulk({
+                index,
+                refresh,
+                operations: hits.flatMap((hit) => [
+                  {
+                    update: {
+                      _id: hit._id,
+                      if_seq_no: hit._seq_no,
+                      if_primary_term: hit._primary_term,
                     },
-                    { script },
-                  ]),
-                });
-                for (const item of result.items) {
-                  const outcome = item.update;
-                  if (outcome?.status === 409 && outcome._id) {
-                    conflictedIds.push(outcome._id);
-                  } else if (outcome?.status === 404) {
-                    // Another request deleted the row.
-                  } else if (!outcome || outcome.error) {
-                    throw new Error(
-                      `updateMany on "${model}" failed after updating ${updated} rows: ${outcome?.error?.reason ?? outcome?.error?.type ?? "unexpected bulk response"}`,
-                    );
-                  } else {
-                    updated++;
-                  }
+                  },
+                  { script },
+                ]),
+              });
+              for (const item of result.items) {
+                const outcome = item.update;
+                if (outcome?.status === 409 && outcome._id) {
+                  conflictedIds.push(outcome._id);
+                } else if (outcome?.status === 404) {
+                  // Another request deleted the row.
+                } else if (!outcome || outcome.error) {
+                  throw new Error(
+                    `updateMany on "${model}" failed after updating ${updated} rows: ${outcome?.error?.reason ?? outcome?.error?.type ?? "unexpected bulk response"}`,
+                  );
+                } else {
+                  updated++;
                 }
-                if (hits.length < UPDATE_MANY_PAGE_SIZE) break;
               }
-            } finally {
-              await client
-                .closePointInTime({ id: pointInTime.id })
-                .catch(() => {});
+              if (hits.length < UPDATE_MANY_PAGE_SIZE) break;
             }
 
             if (conflictedIds.length === 0) return updated;
