@@ -17,15 +17,15 @@ import {
   waitOutWriteBlock,
   withElasticsearchRetry,
   writeBlockWaiter,
-} from "./elasticsearch-client";
+} from "./elasticsearch-client.js";
 import {
   ensureAliasedIndex,
   expectedMappings,
   expectedProperties,
   migrateAliasedIndex,
-} from "./index-layout";
-import { MIGRATOR, type MigratedModel, type Migrator } from "./migrate";
-import { whereToQuery } from "./where-to-query";
+} from "./index-layout.js";
+import { MIGRATOR, type MigratedModel, type Migrator } from "./migrate.js";
+import { whereToQuery } from "./where-to-query.js";
 
 type Primitive = string | number | boolean | Date | null;
 type SourceDoc = Record<

@@ -2,7 +2,7 @@ import type { Client } from "@elastic/elasticsearch";
 import type { MappingProperty } from "@elastic/elasticsearch/lib/api/types";
 import type { BetterAuthDBSchema, DBFieldAttribute } from "better-auth/db";
 
-import { statusCodeOf, wait } from "./elasticsearch-client";
+import { statusCodeOf, wait } from "./elasticsearch-client.js";
 
 /**
  * Strings are keywords. 8191 is the longest string, in characters, that is

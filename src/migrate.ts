@@ -1,4 +1,4 @@
-import type { MigratedIndex } from "./index-layout";
+import type { MigratedIndex } from "./index-layout.js";
 
 /** What migrate() did to one model whose mapping had changed. */
 export interface MigratedModel extends MigratedIndex {
