@@ -114,20 +114,18 @@ export const elasticsearchAdapter = (
 
       /**
        * The alias for a model, after making sure it exists with the mapping
-       * the schema needs. Aliases are named after the default model name, as
-       * 0.1.x named its indices, so a custom `modelName` does not rename them
-       * and a 0.1.x index is always found.
+       * the schema needs. `model` is the database model name the factory
+       * passes, so a custom `modelName` names the alias.
        */
       const ensureAlias = async (model: string) => {
-        const defaultModel = getDefaultModelName(model);
-        const alias = indexForModel(defaultModel);
+        const alias = indexForModel(model);
         let check = ready.get(alias);
         if (!check) {
           check = withRetry(() =>
             ensureAliasedIndex(
               client,
               alias,
-              expectedProperties(schema, defaultModel),
+              expectedProperties(schema, getDefaultModelName(model)),
               async () => ({
                 numberOfShards,
                 numberOfReplicas,

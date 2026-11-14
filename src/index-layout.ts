@@ -108,7 +108,7 @@ export const ensureAliasedIndex = async (
 
   if (alias in live) {
     throw new Error(
-      `"${alias}" is a plain Elasticsearch index, but this adapter expects an alias over a versioned index. It was probably created by @cemcevik/better-auth-elasticsearch 0.1.x, whose indices are not supported. Nothing was changed.`,
+      `"${alias}" is a plain Elasticsearch index, but this adapter expects an alias over a versioned index. Delete or rename the index. Nothing was changed.`,
     );
   }
 

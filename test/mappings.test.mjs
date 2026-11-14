@@ -213,7 +213,7 @@ describe("index layout and mappings", () => {
     await client.indices.create({ index, mappings: { dynamic: true } });
 
     await expect(adapter.count({ model: "user" })).rejects.toThrow(
-      /plain Elasticsearch index.*0\.1/,
+      /plain Elasticsearch index.*Nothing was changed/,
     );
 
     const indices = await client.indices.get({ index: `${indexPrefix}_*` });
@@ -221,14 +221,16 @@ describe("index layout and mappings", () => {
     expect(indices[index].mappings).toEqual({ dynamic: "true" });
   });
 
-  it("finds a plain index under the default model name when the model is renamed", async () => {
+  it("names the alias after a custom model name", async () => {
     const { indexPrefix, adapter } = freshAdapter({
       user: { modelName: "members" },
     });
-    await client.indices.create({ index: `${indexPrefix}_user` });
 
-    await expect(adapter.count({ model: "user" })).rejects.toThrow(
-      /plain Elasticsearch index/,
-    );
+    await adapter.count({ model: "user" });
+
+    const aliases = await client.indices.getAlias({
+      name: `${indexPrefix}_members`,
+    });
+    expect(Object.keys(aliases)).toEqual([`${indexPrefix}_members_v1`]);
   });
 });
