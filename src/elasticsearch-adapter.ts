@@ -139,8 +139,8 @@ export const elasticsearchAdapter = (
       const withRetry = <T>(operation: () => Promise<T>) =>
         withElasticsearchRetry(operation, maxRetries);
 
-      const whileMigrating = <T>(operation: () => Promise<T>) =>
-        waitOutWriteBlock(writeBlockTimeoutMs, operation);
+      const whileMigrating = <T>(index: string, operation: () => Promise<T>) =>
+        waitOutWriteBlock(writeBlockTimeoutMs, index, operation);
 
       // Elasticsearch index and alias names must be lowercase.
       const indexForModel = (model: string) =>
@@ -217,7 +217,10 @@ export const elasticsearchAdapter = (
       };
 
       // One model at a time, so a failure leaves the rest untouched.
-      const migrator: Migrator = async ({ deleteOldIndices }) => {
+      const migrator: Migrator = async ({
+        deleteOldIndices,
+        oldIndexGraceMs,
+      }) => {
         const migrated: MigratedModel[] = [];
         for (const [model, table] of Object.entries(schema)) {
           const result = await migrateAliasedIndex(
@@ -225,9 +228,18 @@ export const elasticsearchAdapter = (
             indexForModel(table.modelName),
             expectedProperties(schema, model),
             indexSettings(model),
-            { deleteOldIndex: deleteOldIndices },
           );
-          if (result) migrated.push({ model, ...result });
+          if (result) migrated.push({ model, ...result, fromDeleted: false });
+        }
+        if (deleteOldIndices && migrated.length > 0) {
+          // A write that read a row just before a swap is still aimed at the
+          // old index. While that exists the write meets its block and reads
+          // again; deleted, Elasticsearch would create it anew, empty.
+          await wait(oldIndexGraceMs);
+          for (const entry of migrated) {
+            await withRetry(() => client.indices.delete({ index: entry.from }));
+            entry.fromDeleted = true;
+          }
         }
         return { migrated };
       };
@@ -318,7 +330,7 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
-          return whileMigrating(() =>
+          return whileMigrating(index, () =>
             retryOnContention<T | null>(
               `consumeOne on "${model}"`,
               MAX_ATOMIC_ATTEMPTS,
@@ -369,7 +381,7 @@ export const elasticsearchAdapter = (
           const query = queryFor(model, where);
           const params = { increment, set: set ?? {} };
 
-          return whileMigrating(() =>
+          return whileMigrating(index, () =>
             retryOnContention<T | null>(
               `incrementOne on "${model}"`,
               MAX_ATOMIC_ATTEMPTS,
@@ -428,7 +440,7 @@ export const elasticsearchAdapter = (
           };
 
           try {
-            await whileMigrating(() =>
+            await whileMigrating(index, () =>
               withRetry(() =>
                 client.index({
                   index,
@@ -550,7 +562,7 @@ export const elasticsearchAdapter = (
           const query = queryFor(model, where);
 
           // Conditional on the row read, so a blocked write reads again.
-          return whileMigrating(async () => {
+          return whileMigrating(index, async () => {
             const row = await findVersioned(index, query);
             if (!row) return null;
 
@@ -602,7 +614,10 @@ export const elasticsearchAdapter = (
           let retryIds: string[] | undefined;
           // Passes that waited out a write block do not count towards
           // MAX_MANY_PASSES; the write block timeout bounds them instead.
-          const pauseWhileBlocked = writeBlockWaiter(writeBlockTimeoutMs);
+          const pauseWhileBlocked = writeBlockWaiter(
+            writeBlockTimeoutMs,
+            index,
+          );
           let pass = 0;
           while (pass < MAX_MANY_PASSES) {
             const passQuery = retryIds
@@ -610,7 +625,7 @@ export const elasticsearchAdapter = (
               : query;
             const unwrittenIds: string[] = [];
             let rejected = false;
-            let blocked = false;
+            let blockedBy: unknown;
 
             // Paging by id needs no point in time: ids are unique and never
             // change, so no row is read twice, and a row that changes on a
@@ -654,7 +669,7 @@ export const elasticsearchAdapter = (
                 const outcome = item.update;
                 if (isWriteBlocked(outcome) && outcome?._id) {
                   unwrittenIds.push(outcome._id);
-                  blocked = true;
+                  blockedBy = outcome.error;
                 } else if (
                   (outcome?.status === 409 || outcome?.status === 429) &&
                   outcome._id
@@ -680,11 +695,10 @@ export const elasticsearchAdapter = (
             // whether those rows still match and what to condition on. Even
             // with "immediate" refresh a winner may not have refreshed yet.
             await withRetry(() => client.indices.refresh({ index }));
-            if (blocked) {
+            if (blockedBy) {
               await pauseWhileBlocked(
-                new Error(
-                  `updateMany on "${model}" updated ${updated} rows, but the index stayed write-blocked by a migration for longer than ${writeBlockTimeoutMs} ms`,
-                ),
+                blockedBy,
+                `updateMany on "${model}" had updated ${updated} rows.`,
               );
               continue;
             }
@@ -708,7 +722,7 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
-          await whileMigrating(async () => {
+          await whileMigrating(index, async () => {
             const searchResult = await withRetry(() =>
               client.search<SourceDoc>({ index, query, size: 1 }),
             );
@@ -741,7 +755,10 @@ export const elasticsearchAdapter = (
           // match, so a rerun never counts a row twice. A pass refused by a
           // migration's write block reruns too, without counting as a pass.
           let deleted = 0;
-          const pauseWhileBlocked = writeBlockWaiter(writeBlockTimeoutMs);
+          const pauseWhileBlocked = writeBlockWaiter(
+            writeBlockTimeoutMs,
+            index,
+          );
           let pass = 0;
           while (pass < MAX_MANY_PASSES) {
             let result: estypes.DeleteByQueryResponse;
@@ -758,7 +775,10 @@ export const elasticsearchAdapter = (
               if (!isWriteBlocked(error)) throw error;
               // Rows deleted before the block are gone and not copied over.
               deleted += deletedBefore(error);
-              await pauseWhileBlocked(error);
+              await pauseWhileBlocked(
+                error,
+                `deleteMany on "${model}" had deleted ${deleted} rows.`,
+              );
               continue;
             }
             deleted += result.deleted ?? 0;

@@ -4,23 +4,27 @@ import type { MigratedIndex } from "./index-layout";
 export interface MigratedModel extends MigratedIndex {
   /** The model's name in the better-auth schema, such as "user". */
   model: string;
+  /** Whether `from` was deleted (see `deleteOldIndices`). */
+  fromDeleted: boolean;
 }
 
 export interface MigrateOptions {
   /**
-   * Deletes each model's previous index once its alias points at the new one.
-   * Off by default, so the old index stays as a rollback.
-   *
-   * Only turn it on when the app is idle. A conditional write (an update or
-   * an atomic consume or increment) that read a row just before the swap is
-   * aimed at the old index; while that index exists the write meets its
-   * write block and tries again on the new one. Once it is deleted,
-   * Elasticsearch instead creates an empty index of the same name for that
-   * write, which then fails: an update throws a version conflict, and
-   * updateMany skips the row as if it had been deleted. The empty index is
-   * left behind.
+   * Deletes each model's previous index once every model has moved and
+   * `oldIndexGraceMs` has passed. Off by default, so the old index stays as
+   * a rollback.
    */
   deleteOldIndices?: boolean;
+  /**
+   * How long, in milliseconds, to keep the old indices after the last swap
+   * before deleting them (default 60000). A write that read a row just
+   * before a swap is still aimed at the old index; while that exists the
+   * write meets its write block and tries again on the new one. Deleted too
+   * soon, Elasticsearch would create an empty index of that name for the
+   * write instead, and the write would fail. Keep it above the
+   * Elasticsearch client's request timeout (30 seconds by default).
+   */
+  oldIndexGraceMs?: number;
 }
 
 export interface MigrationResult {
@@ -60,5 +64,8 @@ export const migrate = async (
       "migrate() needs a better-auth instance whose database is elasticsearchAdapter() from @cemcevik/better-auth-elasticsearch.",
     );
   }
-  return migrator({ deleteOldIndices: options.deleteOldIndices ?? false });
+  return migrator({
+    deleteOldIndices: options.deleteOldIndices ?? false,
+    oldIndexGraceMs: options.oldIndexGraceMs ?? 60_000,
+  });
 };

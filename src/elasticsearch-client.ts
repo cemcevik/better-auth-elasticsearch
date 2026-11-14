@@ -55,31 +55,38 @@ export const isWriteBlocked = (errorOrItem: unknown): boolean => {
 /**
  * A wait of at most `timeoutMs` from the first pause, spread over many short
  * pauses. Each call pauses once, a little longer each time; once the time is
- * used up it throws `error` instead.
+ * used up it throws an error saying `alias` is still write-blocked, with
+ * `cause` and any `progress` made so far.
  */
-export const writeBlockWaiter = (timeoutMs: number) => {
+export const writeBlockWaiter = (timeoutMs: number, alias: string) => {
   let deadline: number | undefined;
   let pauses = 0;
-  return async (error: unknown): Promise<void> => {
+  return async (cause: unknown, progress?: string): Promise<void> => {
     deadline ??= Date.now() + timeoutMs;
     const left = deadline - Date.now();
-    if (left <= 0) throw error;
+    if (left <= 0) {
+      throw new Error(
+        `Writes to "${alias}" were still blocked after ${timeoutMs} ms: a migration is in progress or was interrupted. If no migrate() is running, run migrate() again to finish it.${progress ? ` ${progress}` : ""}`,
+        { cause },
+      );
+    }
     const pause = Math.min(500, 25 * 2 ** pauses++) * (0.5 + Math.random());
     await wait(Math.min(left, pause));
   };
 };
 
 /**
- * Runs `operation` again while its write meets a migration's write block,
- * for at most `timeoutMs`. The whole operation reruns, so a write that is
- * conditional on what it read reads again from the index the alias points
- * at by then.
+ * Runs `operation` again while its write to `alias` meets a migration's
+ * write block, for at most `timeoutMs`. The whole operation reruns, so a
+ * write that is conditional on what it read reads again from the index the
+ * alias points at by then.
  */
 export const waitOutWriteBlock = async <T>(
   timeoutMs: number,
+  alias: string,
   operation: () => Promise<T>,
 ): Promise<T> => {
-  const pause = writeBlockWaiter(timeoutMs);
+  const pause = writeBlockWaiter(timeoutMs, alias);
   while (true) {
     try {
       return await operation();

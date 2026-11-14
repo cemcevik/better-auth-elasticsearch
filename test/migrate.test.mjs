@@ -154,7 +154,10 @@ describe("migrate()", () => {
     const { adapter, auth } = app(indexPrefix, scoreAs("number"));
     const alias = `${indexPrefix}_user`;
 
-    const result = await migrate(auth, { deleteOldIndices: true });
+    const result = await migrate(auth, {
+      deleteOldIndices: true,
+      oldIndexGraceMs: 0,
+    });
 
     expect(result.migrated).toEqual([
       expect.objectContaining({ from: `${alias}_v1`, fromDeleted: true }),
@@ -252,15 +255,16 @@ describe("migrate()", () => {
     expect(await adapter.count({ model: "user" })).toBe(users.length + 1 - 3);
   });
 
-  it("applies an update that read the old index before the swap to the new one", async () => {
+  /**
+   * Has the running app read a row before the alias swap and write it after:
+   * its next search returns 300 ms after the alias points at the new index.
+   * Returns the update's result, the row as found afterwards, and the
+   * migration's result.
+   */
+  const updateAcrossSwap = async (migrateOptions) => {
     const { indexPrefix, users } = await populatedPrefix(3);
     const [target] = users;
-    // The running app's next search returns its result only after the
-    // migration is done, so the write that follows comes after the swap.
-    let migrated;
-    const migrationDone = new Promise((resolve) => {
-      migrated = resolve;
-    });
+    const alias = `${indexPrefix}_user`;
     let onRead;
     const read = new Promise((resolve) => {
       onRead = resolve;
@@ -273,7 +277,11 @@ describe("migrate()", () => {
             armed = false;
             const result = await target.search(params);
             onRead();
-            await migrationDone;
+            while (!(await backingIndices(alias)).includes(`${alias}_v2`)) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            // Long enough for a deletion right after the swap to happen first.
+            await new Promise((resolve) => setTimeout(resolve, 300));
             return result;
           };
         }
@@ -302,17 +310,38 @@ describe("migrate()", () => {
       update: { name: "Renamed across the swap" },
     });
     await read;
-    await migrate(auth);
-    migrated();
+    const [updated, result] = await Promise.all([
+      update,
+      migrate(auth, migrateOptions),
+    ]);
 
-    expect((await update)?.name).toBe("Renamed across the swap");
     const { adapter } = app(indexPrefix, scoreAs("number"));
     const found = await adapter.findOne({
       model: "user",
       where: [{ field: "id", value: target.id }],
     });
+    return { alias, target, updated, found, result };
+  };
+
+  it("applies an update that read the old index before the swap to the new one", async () => {
+    const { target, updated, found } = await updateAcrossSwap();
+
+    expect(updated?.name).toBe("Renamed across the swap");
     expect(found?.name).toBe("Renamed across the swap");
     expect(found?.email).toBe(target.email);
+  });
+
+  it("deletes the old index only after an update in flight across the swap is done", async () => {
+    const { alias, updated, found, result } = await updateAcrossSwap({
+      deleteOldIndices: true,
+      oldIndexGraceMs: 1_000,
+    });
+
+    expect(updated?.name).toBe("Renamed across the swap");
+    expect(found?.name).toBe("Renamed across the swap");
+    expect(result.migrated[0]?.fromDeleted).toBe(true);
+    // Not recreated empty by the late write, nor left behind.
+    expect(await client.indices.exists({ index: `${alias}_v1` })).toBe(false);
   });
 
   it("fails a write that waits longer than writeBlockTimeoutMs", async () => {
@@ -329,7 +358,11 @@ describe("migrate()", () => {
     const started = Date.now();
     const attempt = running.create({ model: "user", data: userData() });
 
-    await expect(attempt).rejects.toThrow(/index write/);
+    await expect(attempt).rejects.toThrow(
+      new RegExp(
+        `"${indexPrefix}_user" .*migration is in progress or was interrupted.*run migrate\\(\\) again`,
+      ),
+    );
     expect(Date.now() - started).toBeGreaterThanOrEqual(300);
     expect(Date.now() - started).toBeLessThan(5_000);
     release();

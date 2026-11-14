@@ -168,11 +168,10 @@ const mappingDiff = (expected: MappingProperties, live: MappingProperties) => {
 /** What migrate() did to one model. */
 export interface MigratedIndex {
   alias: string;
-  /** The index the alias pointed at before; kept unless deleted. */
+  /** The index the alias pointed at before. */
   from: string;
   /** The index the alias points at now. */
   to: string;
-  fromDeleted: boolean;
 }
 
 /**
@@ -192,7 +191,6 @@ export const migrateAliasedIndex = async (
   alias: string,
   expected: MappingProperties,
   settings: () => Promise<IndexSettings>,
-  { deleteOldIndex }: { deleteOldIndex: boolean },
 ): Promise<MigratedIndex | undefined> => {
   const live = await liveMappings(client, alias);
   if (!live) return undefined;
@@ -229,8 +227,7 @@ export const migrateAliasedIndex = async (
     }
   }
 
-  if (deleteOldIndex) await client.indices.delete({ index: from });
-  return { alias, from, to, fromDeleted: deleteOldIndex };
+  return { alias, from, to };
 };
 
 /** Whether `alias` points at `index`; false when that cannot be told. */
