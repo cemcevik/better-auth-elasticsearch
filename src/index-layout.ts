@@ -2,6 +2,8 @@ import type { Client } from "@elastic/elasticsearch";
 import type { MappingProperty } from "@elastic/elasticsearch/lib/api/types";
 import type { BetterAuthDBSchema, DBFieldAttribute } from "better-auth/db";
 
+import { statusCodeOf } from "./elasticsearch-client";
+
 /**
  * Strings are keywords. 8191 is the longest string, in characters, that is
  * always within Lucene's term limit of 32766 bytes (four UTF-8 bytes per
@@ -51,8 +53,7 @@ export const expectedProperties = (
 /** The type Elasticsearch reports for a property; objects may omit it. */
 const typeOf = (property: MappingProperty): string => property.type ?? "object";
 
-const isNotFound = (error: unknown) =>
-  (error as { meta?: { statusCode?: number } }).meta?.statusCode === 404;
+const isNotFound = (error: unknown) => statusCodeOf(error) === 404;
 
 const isAlreadyExists = (error: unknown) =>
   (error as { meta?: { body?: { error?: { type?: string } } } }).meta?.body

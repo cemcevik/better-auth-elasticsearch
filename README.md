@@ -30,6 +30,7 @@ export const auth = betterAuth({
     maxRetries: 3,
     // "immediate" (default): every write is searchable on return.
     // "wait_for": wait for the next scheduled refresh; less cluster load.
+    // updateMany and deleteMany always refresh immediately.
     refresh: "immediate",
     number_of_shards: 1,
     number_of_replicas: 0,

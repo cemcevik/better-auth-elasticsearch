@@ -49,18 +49,51 @@ const contractTestSuite = createTestSuite(
         const user = await generate("user");
         await adapter.create({ model: "user", data: user, forceAllowId: true });
 
-        const again = adapter.create({
+        const secondCreate = adapter.create({
           model: "user",
           data: { ...user, name: "Second writer" },
           forceAllowId: true,
         });
 
-        await expect(again).rejects.toThrow(/duplicate key/);
+        await expect(secondCreate).rejects.toThrow(/duplicate key/);
         const found = await adapter.findOne({
           model: "user",
           where: [{ field: "id", value: user.id }],
         });
         expect(found?.name).toBe(user.name);
+      },
+    "updateMany and deleteMany return the number of rows they touched":
+      async () => {
+        const rows = [];
+        for (const name of ["keep", "match", "match"]) {
+          rows.push(
+            await adapter.create({
+              model: "user",
+              data: { ...(await generate("user")), name },
+              forceAllowId: true,
+            }),
+          );
+        }
+        const matching = [{ field: "name", value: "match" }];
+
+        const updated = await adapter.updateMany({
+          model: "user",
+          where: matching,
+          update: { emailVerified: true },
+        });
+        const deleted = await adapter.deleteMany({
+          model: "user",
+          where: matching,
+        });
+        const deletedAgain = await adapter.deleteMany({
+          model: "user",
+          where: matching,
+        });
+
+        expect(updated).toBe(2);
+        expect(deleted).toBe(2);
+        expect(deletedAgain).toBe(0);
+        expect(await adapter.count({ model: "user" })).toBe(1);
       },
     "delete with an empty where deletes nothing": async () => {
       const user = await adapter.create({

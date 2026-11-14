@@ -5,23 +5,24 @@ const isRetriableStatus = (status?: number): boolean => {
   return status === 408 || status === 429 || status >= 500;
 };
 
+/** The HTTP status of an Elasticsearch client error, if it has one. */
+export const statusCodeOf = (error: unknown): number | undefined => {
+  const withStatus = error as
+    | { statusCode?: number; meta?: { statusCode?: number } }
+    | undefined;
+  return withStatus?.statusCode ?? withStatus?.meta?.statusCode;
+};
+
 /** Elasticsearch's version conflict: a duplicate id or a stale write. */
 export const isVersionConflict = (error: unknown): boolean =>
-  (error as { meta?: { statusCode?: number } } | undefined)?.meta
-    ?.statusCode === 409;
+  statusCodeOf(error) === 409;
 
 const isRetriableError = (error: unknown): boolean => {
   if (!(error instanceof Error)) return false;
 
-  const withStatus = error as Error & {
-    statusCode?: number;
-    meta?: { statusCode?: number };
-    name?: string;
-    code?: string;
-  };
+  if (isRetriableStatus(statusCodeOf(error))) return true;
 
-  const statusCode = withStatus.statusCode ?? withStatus.meta?.statusCode;
-  if (isRetriableStatus(statusCode)) return true;
+  const withStatus = error as Error & { code?: string };
 
   const name = withStatus.name ?? "";
   const code = withStatus.code ?? "";
