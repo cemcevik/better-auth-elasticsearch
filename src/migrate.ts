@@ -1,4 +1,5 @@
 import type { MigratedIndex } from "./index-layout.js";
+import type { DuplicateValues } from "./unique-reservations.js";
 
 /** What migrate() did to one model whose mapping had changed. */
 export interface MigratedModel extends MigratedIndex {
@@ -30,6 +31,12 @@ export interface MigrateOptions {
 export interface MigrationResult {
   /** The models that moved to a new index; models already matching are left out. */
   migrated: MigratedModel[];
+  /**
+   * Values of unique fields that more than one row already holds, one entry
+   * per value, naming the rows but not the value. Such rows were written
+   * before the adapter enforced the field; resolve them by hand.
+   */
+  duplicates: DuplicateValues[];
 }
 
 /** Where the adapter hands migrate() the code that knows its indices. */
@@ -50,6 +57,10 @@ export interface AuthWithContext {
  * database is `elasticsearchAdapter(...)`. Reads carry on throughout; writes
  * to a model being moved wait until it is done (see `writeBlockTimeoutMs`).
  * Models already matching are left alone, so running it again is safe.
+ *
+ * Then reserves the values of unique fields for rows that hold no
+ * reservation yet, such as rows written before the adapter enforced them,
+ * and reports values more than one row holds.
  */
 export const migrate = async (
   auth: AuthWithContext,

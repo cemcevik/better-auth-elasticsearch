@@ -9,3 +9,4 @@ export {
   type MigrationResult,
 } from "./migrate.js";
 export { purgeExpired, type PurgeResult } from "./purge.js";
+export type { DuplicateValues } from "./unique-reservations.js";
