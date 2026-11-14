@@ -1,0 +1,6 @@
+# Package age rule: no version younger than 7 days, except better-auth's own
+# packages (waived so the adapter can track a fresh better-auth release).
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - better-auth
+  - "@better-auth/*"

@@ -128,7 +128,8 @@ export const elasticsearchAdapter = (
       usePlural: false,
       debugLogs: config.debugLogs ?? false,
       supportsJSON: true,
-      supportsDates: true,
+      // Elasticsearch returns dates as strings; the factory converts them back.
+      supportsDates: false,
       supportsBooleans: true,
       supportsNumericIds: false,
       transaction: false,

@@ -36,18 +36,19 @@
   },
   "peerDependencies": {
     "@elastic/elasticsearch": "^9.3.4",
-    "better-auth": "^1.4.21"
+    "better-auth": "^1.7.23"
   },
   "devDependencies": {
+    "@better-auth/test-utils": "1.7.23",
     "@biomejs/biome": "^1.9.4",
+    "@elastic/elasticsearch": "^9.5.1",
     "@types/node": "^24.8.1",
-    "@elastic/elasticsearch": "^9.3.4",
-    "better-auth": "1.4.21",
+    "better-auth": "1.7.23",
     "typescript": "^5.9.3",
     "vitest": "^4.1.0"
   },
   "publishConfig": {
     "access": "public"
   },
-  "packageManager": "pnpm@10.11.1"
+  "packageManager": "pnpm@10.34.9"
 }

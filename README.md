@@ -43,11 +43,19 @@ pnpm test
 pnpm build
 ```
 
-For integration tests:
+For integration tests, start a local single-node Elasticsearch (basic auth
+on, user `elastic`, password `changeme`) and point the tests at it:
 
 ```bash
-ELASTICSEARCH_URL=http://127.0.0.1:9200 BETTER_AUTH_FORCE_ELASTIC_TESTS=true pnpm test:integration
+docker compose up -d --wait
+ELASTICSEARCH_URL=http://127.0.0.1:9200 \
+ELASTICSEARCH_USERNAME=elastic \
+ELASTICSEARCH_PASSWORD=changeme \
+pnpm test:integration
+docker compose down
 ```
+
+Set `ES_VERSION` to choose the server image tag (default `9.5.5`).
 
 ## CI / Release Flow
 
