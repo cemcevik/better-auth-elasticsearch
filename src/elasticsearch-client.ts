@@ -17,6 +17,31 @@ export const statusCodeOf = (error: unknown): number | undefined => {
 export const isVersionConflict = (error: unknown): boolean =>
   statusCodeOf(error) === 409;
 
+/** A document or index that does not exist. */
+export const isNotFound = (error: unknown): boolean =>
+  statusCodeOf(error) === 404;
+
+/**
+ * Runs `attempt` until it returns something other than `retry`, waiting a
+ * short, jittered while between tries so contenders spread out. Throws once
+ * `maxAttempts` tries all asked to retry.
+ */
+export const retryOnContention = async <T>(
+  description: string,
+  maxAttempts: number,
+  attempt: (retry: symbol) => Promise<T | symbol>,
+): Promise<T> => {
+  const retry = Symbol("retry");
+  for (let tries = 0; tries < maxAttempts; tries++) {
+    const result = await attempt(retry);
+    if (result !== retry) return result as T;
+    await wait(Math.random() * Math.min(200, 10 * 2 ** tries));
+  }
+  throw new Error(
+    `${description} did not complete after ${maxAttempts} attempts because other requests kept changing the same rows`,
+  );
+};
+
 const isRetriableError = (error: unknown): boolean => {
   if (!(error instanceof Error)) return false;
 

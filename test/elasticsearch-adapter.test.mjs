@@ -168,6 +168,278 @@ const contractTestSuite = createTestSuite(
   }),
 );
 
+const rateLimitOptions = { rateLimit: { storage: "database" } };
+
+/** Calls `operation` `times` times at once and waits for every call. */
+const concurrently = (times, operation) =>
+  Promise.all(Array.from({ length: times }, (_, index) => operation(index)));
+
+/**
+ * Keeps updating random rows from `rows` until `whileRunning` settles, so the
+ * by-query write in `whileRunning` meets rows that change under it.
+ * Returns what `whileRunning` resolved to.
+ */
+const withConcurrentSessionUpdates = async (adapter, rows, whileRunning) => {
+  let running = true;
+  const updater = async () => {
+    while (running) {
+      const row = rows[Math.floor(Math.random() * rows.length)];
+      // A row changed or deleted between the update's search and its write
+      // makes the update fail with a version conflict; that is the race
+      // under test. Any other error fails the test.
+      await adapter
+        .update({
+          model: "session",
+          where: [{ field: "id", value: row.id }],
+          update: { ipAddress: `10.0.0.${Math.floor(Math.random() * 255)}` },
+        })
+        .catch((error) => {
+          if (error?.meta?.statusCode !== 409) throw error;
+        });
+    }
+  };
+  const updaters = Array.from({ length: 8 }, updater);
+  try {
+    // Let the updaters get going before the by-query write starts.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return await whileRunning();
+  } finally {
+    running = false;
+    await Promise.all(updaters);
+  }
+};
+
+/** Single-use reads, counters and by-query writes under concurrent requests. */
+const concurrencyTestSuite = createTestSuite(
+  "concurrency",
+  {},
+  ({ adapter, generate }) => {
+    const createSessions = async (userId, count) => {
+      const rows = [];
+      for (let index = 0; index < count; index++) {
+        rows.push(
+          await adapter.create({
+            model: "session",
+            data: { ...(await generate("session")), userId },
+            forceAllowId: true,
+          }),
+        );
+      }
+      return rows;
+    };
+
+    const createRateLimit = (count = 0) =>
+      adapter.create({
+        model: "rateLimit",
+        data: {
+          key: `key-${crypto.randomUUID()}`,
+          count,
+          lastRequest: Date.now(),
+        },
+      });
+
+    return {
+      "consumeOne hands one row to exactly one of many simultaneous callers":
+        async () => {
+          const row = await adapter.create({
+            model: "verification",
+            data: await generate("verification"),
+            forceAllowId: true,
+          });
+
+          const results = await concurrently(20, () =>
+            adapter.consumeOne({
+              model: "verification",
+              where: [{ field: "identifier", value: row.identifier }],
+            }),
+          );
+
+          const winners = results.filter((result) => result !== null);
+          expect(winners).toEqual([row]);
+          expect(
+            await adapter.findOne({
+              model: "verification",
+              where: [{ field: "id", value: row.id }],
+            }),
+          ).toBeNull();
+        },
+      "consumeOne deletes only one of several matching rows": async () => {
+        const identifier = `shared-${crypto.randomUUID()}`;
+        for (let index = 0; index < 3; index++) {
+          await adapter.create({
+            model: "verification",
+            data: { ...(await generate("verification")), identifier },
+            forceAllowId: true,
+          });
+        }
+        const where = [{ field: "identifier", value: identifier }];
+
+        const consumed = await adapter.consumeOne({
+          model: "verification",
+          where,
+        });
+
+        expect(consumed?.identifier).toBe(identifier);
+        expect(await adapter.count({ model: "verification", where })).toBe(2);
+      },
+      "consumeOne returns null when no row matches": async () => {
+        const consumed = await adapter.consumeOne({
+          model: "verification",
+          where: [{ field: "identifier", value: "no-such-identifier" }],
+        });
+
+        expect(consumed).toBeNull();
+      },
+      "incrementOne loses no increments under simultaneous callers": {
+        migrateBetterAuth: rateLimitOptions,
+        test: async () => {
+          const row = await createRateLimit();
+
+          const results = await concurrently(20, () =>
+            adapter.incrementOne({
+              model: "rateLimit",
+              where: [{ field: "key", value: row.key }],
+              increment: { count: 1 },
+            }),
+          );
+
+          expect(results.every((result) => result !== null)).toBe(true);
+          const after = await adapter.findOne({
+            model: "rateLimit",
+            where: [{ field: "id", value: row.id }],
+          });
+          expect(after?.count).toBe(20);
+        },
+      },
+      "incrementOne applies deltas and set values and returns the updated row":
+        {
+          migrateBetterAuth: rateLimitOptions,
+          test: async () => {
+            const row = await createRateLimit(5);
+
+            const updated = await adapter.incrementOne({
+              model: "rateLimit",
+              where: [{ field: "key", value: row.key }],
+              increment: { count: -2 },
+              set: { lastRequest: 1234 },
+            });
+
+            expect(updated).toEqual({ ...row, count: 3, lastRequest: 1234 });
+            expect(
+              await adapter.findOne({
+                model: "rateLimit",
+                where: [{ field: "id", value: row.id }],
+              }),
+            ).toEqual(updated);
+          },
+        },
+      "incrementOne whose guard no longer matches returns null and changes nothing":
+        {
+          migrateBetterAuth: rateLimitOptions,
+          test: async () => {
+            const row = await createRateLimit(1);
+            const stillPositive = [
+              { field: "key", value: row.key },
+              { field: "count", operator: "gt", value: 0 },
+            ];
+
+            const first = await adapter.incrementOne({
+              model: "rateLimit",
+              where: stillPositive,
+              increment: { count: -1 },
+            });
+            const second = await adapter.incrementOne({
+              model: "rateLimit",
+              where: stillPositive,
+              increment: { count: -1 },
+              set: { lastRequest: 1 },
+            });
+
+            expect(first?.count).toBe(0);
+            expect(second).toBeNull();
+            expect(
+              await adapter.findOne({
+                model: "rateLimit",
+                where: [{ field: "id", value: row.id }],
+              }),
+            ).toEqual(first);
+          },
+        },
+      "incrementOne guarded counters never go below zero under simultaneous callers":
+        {
+          migrateBetterAuth: rateLimitOptions,
+          test: async () => {
+            const row = await createRateLimit(5);
+
+            const results = await concurrently(20, () =>
+              adapter.incrementOne({
+                model: "rateLimit",
+                where: [
+                  { field: "key", value: row.key },
+                  { field: "count", operator: "gt", value: 0 },
+                ],
+                increment: { count: -1 },
+              }),
+            );
+
+            expect(results.filter((result) => result !== null)).toHaveLength(5);
+            const after = await adapter.findOne({
+              model: "rateLimit",
+              where: [{ field: "id", value: row.id }],
+            });
+            expect(after?.count).toBe(0);
+          },
+        },
+      // Revoking all of a user's sessions while one is being refreshed.
+      "deleteMany leaves no matching row when the rows change under it":
+        async () => {
+          const userId = crypto.randomUUID();
+          const rows = await createSessions(userId, 200);
+          const where = [{ field: "userId", value: userId }];
+
+          const deleted = await withConcurrentSessionUpdates(
+            adapter,
+            rows,
+            () => adapter.deleteMany({ model: "session", where }),
+          );
+
+          expect(await adapter.count({ model: "session", where })).toBe(0);
+          expect(deleted).toBe(rows.length);
+        },
+      // Skipped until the maintainer decides how updateMany treats rows that
+      // change mid-update; see ticket 05. Today it skips a few of 200 rows.
+      "updateMany updates every matching row when the rows change under it":
+        async ({ skip }) => {
+          skip("updateMany conflict handling is undecided (ticket 05)");
+          const userId = crypto.randomUUID();
+          const rows = await createSessions(userId, 200);
+          const where = [{ field: "userId", value: userId }];
+
+          const updated = await withConcurrentSessionUpdates(
+            adapter,
+            rows,
+            () =>
+              adapter.updateMany({
+                model: "session",
+                where,
+                update: { userAgent: "revoked" },
+              }),
+          );
+
+          const missed = await adapter.count({
+            model: "session",
+            where: [
+              ...where,
+              { field: "userAgent", operator: "ne", value: "revoked" },
+            ],
+          });
+          expect(missed).toBe(0);
+          expect(updated).toBe(rows.length);
+        },
+    };
+  },
+);
+
 describe("elasticsearchAdapter", async () => {
   // Vitest collects a skipped suite's body too, so bail out before building a
   // client without a node.
@@ -207,14 +479,31 @@ describe("elasticsearchAdapter", async () => {
   };
 
   await runSuites({
-    tests: [smokeTestSuite(), contractTestSuite(), normalTestSuite()],
+    tests: [
+      smokeTestSuite(),
+      contractTestSuite(),
+      concurrencyTestSuite(),
+      normalTestSuite(),
+    ],
   });
 
   // Every write waits for the next scheduled refresh instead of forcing one,
   // and must still be found by the next read.
   await runSuites({
     adapterOptions: { refresh: "wait_for" },
-    tests: [smokeTestSuite(), contractTestSuite()],
+    tests: [
+      smokeTestSuite(),
+      contractTestSuite(),
+      // Contenders must not keep losing to a write they cannot search yet.
+      // The by-query tests are left out: creating their 200 rows one
+      // refresh at a time would take minutes.
+      concurrencyTestSuite({
+        disableTests: {
+          "deleteMany leaves no matching row when the rows change under it": true,
+          "updateMany updates every matching row when the rows change under it": true,
+        },
+      }),
+    ],
     prefixTests: "wait_for refresh",
   });
 });

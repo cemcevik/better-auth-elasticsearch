@@ -8,7 +8,9 @@ import {
 } from "better-auth/adapters";
 
 import {
+  isNotFound,
   isVersionConflict,
+  retryOnContention,
   withElasticsearchRetry,
 } from "./elasticsearch-client";
 import { ensureAliasedIndex, expectedProperties } from "./index-layout";
@@ -38,6 +40,30 @@ export interface ElasticAdapterConfig {
   number_of_shards?: number;
   number_of_replicas?: number;
 }
+
+/**
+ * How often a single-row atomic write searches again after losing a race.
+ * Each lost race means another request's write went through, so this bounds
+ * the number of simultaneous writers to one row the adapter rides out.
+ */
+const MAX_ATOMIC_ATTEMPTS = 50;
+
+/**
+ * How often `deleteMany` reruns while rows change under it. Each pass deletes
+ * every row that did not change mid-pass, and deleted rows no longer match.
+ */
+const MAX_DELETE_MANY_PASSES = 5;
+
+// Applies `params.increment` as deltas (a missing counter counts as 0), then
+// assigns `params.set`.
+const INCREMENT_SCRIPT = `
+for (entry in params.increment.entrySet()) {
+  def current = ctx._source[entry.getKey()];
+  ctx._source[entry.getKey()] = (current == null ? 0 : current) + entry.getValue();
+}
+for (entry in params.set.entrySet()) {
+  ctx._source[entry.getKey()] = entry.getValue();
+}`;
 
 const normalizeHit = (hit: {
   _id?: string;
@@ -170,7 +196,150 @@ export const elasticsearchAdapter = (
           })),
         );
 
+      /**
+       * After losing a race to another write, makes that write searchable
+       * before searching again. With "immediate" refresh it already is; with
+       * "wait_for" it would otherwise stay hidden until the next scheduled
+       * refresh, and every retry until then would lose again.
+       */
+      const afterLostRace = async (index: string) => {
+        if (refresh === "wait_for") {
+          await withRetry(() => client.indices.refresh({ index }));
+        }
+      };
+
+      // Conditional writes below are not passed through `withRetry`: a write
+      // that timed out may still have landed, and a retry would then see its
+      // own write as a lost race and apply it twice.
+
+      /**
+       * The first row matching `query`, with the sequence number and primary
+       * term a conditional write needs to fail if the row changed since.
+       */
+      const findVersioned = async (index: string, query: object) => {
+        const result = await withRetry(() =>
+          client.search<SourceDoc>({
+            index,
+            query,
+            size: 1,
+            seq_no_primary_term: true,
+          }),
+        );
+        const hit = result.hits.hits[0];
+        if (
+          !hit?._id ||
+          hit._seq_no === undefined ||
+          hit._primary_term === undefined
+        ) {
+          return null;
+        }
+        return {
+          id: hit._id,
+          source: hit._source ?? {},
+          ifUnchanged: {
+            if_seq_no: hit._seq_no,
+            if_primary_term: hit._primary_term,
+          },
+        };
+      };
+
       return {
+        // Deletes the row only if it is unchanged since the search found it.
+        // A lost race searches again, since the row may have been updated
+        // rather than consumed; a row another caller deleted yields null.
+        consumeOne: async <T>({
+          model,
+          where,
+        }: {
+          model: string;
+          where: CleanedWhere[];
+        }) => {
+          const index = await ensureAlias(model);
+          const query = queryFor(model, where);
+
+          return retryOnContention<T | null>(
+            `consumeOne on "${model}"`,
+            MAX_ATOMIC_ATTEMPTS,
+            async (retry) => {
+              const row = await findVersioned(index, query);
+              if (!row) return null;
+              try {
+                await client.delete({
+                  index,
+                  id: row.id,
+                  ...row.ifUnchanged,
+                  refresh,
+                });
+                return normalizeHit({ _id: row.id, _source: row.source }) as T;
+              } catch (error) {
+                if (!isVersionConflict(error) && !isNotFound(error))
+                  throw error;
+              }
+              // Searches lag behind writes; a realtime check tells whether
+              // another caller deleted the row or only changed it.
+              const stillThere = await withRetry(() =>
+                client.exists({ index, id: row.id }),
+              );
+              if (!stillThere) return null;
+              await afterLostRace(index);
+              return retry;
+            },
+          );
+        },
+        // The search applies the where guard; the scripted update applies only
+        // if the row is unchanged since, so the guard held when it was written.
+        // A lost race searches again, which re-checks the guard.
+        incrementOne: async <T>({
+          model,
+          where,
+          increment,
+          set,
+        }: {
+          model: string;
+          where: CleanedWhere[];
+          increment: Record<string, number>;
+          set?: Record<string, unknown>;
+        }) => {
+          const index = await ensureAlias(model);
+          const query = queryFor(model, where);
+          const params = { increment, set: set ?? {} };
+
+          return retryOnContention<T | null>(
+            `incrementOne on "${model}"`,
+            MAX_ATOMIC_ATTEMPTS,
+            async (retry) => {
+              const row = await findVersioned(index, query);
+              if (!row) return null;
+              try {
+                const result = await client.update<SourceDoc, never, SourceDoc>(
+                  {
+                    index,
+                    id: row.id,
+                    ...row.ifUnchanged,
+                    refresh,
+                    script: {
+                      lang: "painless",
+                      source: INCREMENT_SCRIPT,
+                      params,
+                    },
+                    _source: true,
+                  },
+                );
+                return normalizeHit({
+                  _id: row.id,
+                  _source: result.get?._source,
+                }) as T;
+              } catch (error) {
+                // A conflict means the row changed; a missing row was deleted
+                // and the next search will not find it.
+                if (!isVersionConflict(error) && !isNotFound(error))
+                  throw error;
+                await afterLostRace(index);
+                return retry;
+              }
+            },
+          );
+        },
         create: async <T extends Record<string, unknown>>({
           model,
           data,
@@ -310,40 +479,21 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
-          const searchResult = await withRetry(() =>
-            client.search<SourceDoc>({
-              index,
-              query,
-              size: 1,
-              seq_no_primary_term: true,
-            }),
-          );
-
-          const hit = searchResult.hits.hits[0];
-          if (
-            !hit?._source ||
-            hit._seq_no === undefined ||
-            hit._primary_term === undefined
-          ) {
-            return null;
-          }
-
-          const hitId = hit._id;
-          if (!hitId) return null;
+          const row = await findVersioned(index, query);
+          if (!row) return null;
 
           const mergedDocument: SourceDoc = {
-            ...hit._source,
+            ...row.source,
             ...(update as SourceDoc),
-            id: (hit._source.id as string | undefined) ?? hitId,
+            id: (row.source.id as string | undefined) ?? row.id,
           };
 
           await withRetry(() =>
             client.index({
               index,
-              id: hitId,
+              id: row.id,
               document: mergedDocument,
-              if_seq_no: hit._seq_no,
-              if_primary_term: hit._primary_term,
+              ...row.ifUnchanged,
               refresh,
             }),
           );
@@ -421,16 +571,25 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
-          const result = await withRetry(() =>
-            client.deleteByQuery({
-              index,
-              query,
-              conflicts: "proceed",
-              refresh: true,
-            }),
+          // A row that changes mid-pass is skipped as a version conflict, so
+          // rerun until a pass meets none. Rows already deleted no longer
+          // match, so a rerun never counts a row twice.
+          let deleted = 0;
+          for (let pass = 0; pass < MAX_DELETE_MANY_PASSES; pass++) {
+            const result = await withRetry(() =>
+              client.deleteByQuery({
+                index,
+                query,
+                conflicts: "proceed",
+                refresh: true,
+              }),
+            );
+            deleted += result.deleted ?? 0;
+            if (!result.version_conflicts) return deleted;
+          }
+          throw new Error(
+            `deleteMany on "${model}" deleted ${deleted} rows, but other requests kept changing matching rows; some may remain after ${MAX_DELETE_MANY_PASSES} passes`,
           );
-
-          return result.deleted ?? 0;
         },
       };
     },
