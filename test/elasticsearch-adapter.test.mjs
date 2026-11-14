@@ -1,5 +1,8 @@
 import {
+  authFlowTestSuite,
+  caseInsensitiveTestSuite,
   createTestSuite,
+  joinsTestSuite,
   normalTestSuite,
   testAdapter,
 } from "@better-auth/test-utils/adapter";
@@ -135,6 +138,36 @@ const contractTestSuite = createTestSuite(
         expect(one?.email).toBe(user.email);
       },
     },
+    // Microsoft ID tokens are often longer than a keyword can index.
+    "a string too long to index is returned intact and its row stays findable":
+      async () => {
+        const user = await adapter.create({
+          model: "user",
+          data: await generate("user"),
+          forceAllowId: true,
+        });
+        // A JWT-like value past the keyword limit of 8191 characters and past
+        // Lucene's term limit of 32766 bytes too, where an unbounded keyword
+        // would make Elasticsearch reject the whole row. The two-byte "é"
+        // checks the value comes back byte for byte.
+        const idToken = `eyJ${"x".repeat(32766)}é`;
+        const account = await adapter.create({
+          model: "account",
+          data: { ...(await generate("account")), userId: user.id, idToken },
+          forceAllowId: true,
+        });
+
+        const found = await adapter.findOne({
+          model: "account",
+          where: [
+            { field: "userId", value: user.id },
+            { field: "providerId", value: account.providerId },
+          ],
+        });
+
+        expect(found?.id).toBe(account.id);
+        expect(found?.idToken).toBe(idToken);
+      },
     "null matches a field missing from rows written before it existed":
       async () => {
         const older = await adapter.create({
@@ -540,6 +573,13 @@ describe("elasticsearchAdapter", async () => {
       contractTestSuite(),
       concurrencyTestSuite(),
       normalTestSuite(),
+      authFlowTestSuite(),
+      caseInsensitiveTestSuite(),
+      // The adapter has no native joins; the factory's fallback queries
+      // serve them.
+      joinsTestSuite(),
+      // Not run, as the adapter does not support them: numberIdTestSuite
+      // (ids are strings) and transactionsTestSuite (no transactions).
     ],
   });
 
