@@ -25,6 +25,11 @@ import {
   migrateAliasedIndex,
 } from "./index-layout.js";
 import { MIGRATOR, type MigratedModel, type Migrator } from "./migrate.js";
+import {
+  type DuplicateValues,
+  createReservations,
+  duplicateError,
+} from "./unique-reservations.js";
 import { whereToQuery } from "./where-to-query.js";
 
 type Primitive = string | number | boolean | Date | null;
@@ -67,6 +72,17 @@ export interface ElasticsearchAdapterConfig {
   numberOfShards?: number;
   /** Replicas of each index the adapter creates (default 0). */
   numberOfReplicas?: number;
+  /**
+   * Unique fields left unenforced, as `"model.field"` in better-auth schema
+   * names, or `"model.fieldA+fieldB"` for a unique index over several fields,
+   * in index order (default `["session.token"]`: the token is random, and
+   * reserving it would slow every sign-in). A list given here replaces the
+   * default, so include `"session.token"` to keep skipping it. Every other
+   * field the schema declares unique, and every unique index, gets a
+   * reservation per value, which costs an extra request per write that sets
+   * or frees one.
+   */
+  skipUniqueFor?: string[];
 }
 
 /**
@@ -157,6 +173,15 @@ export const elasticsearchAdapter = (
       const whileMigrating = <T>(index: string, operation: () => Promise<T>) =>
         waitOutWriteBlock(writeBlockTimeoutMs, index, operation);
 
+      const reservations = createReservations({
+        client,
+        schema,
+        getDefaultModelName,
+        skipUniqueFor: config.skipUniqueFor ?? ["session.token"],
+        settings: indexSettings,
+        withRetry,
+      });
+
       // Elasticsearch index and alias names must be lowercase.
       const indexForModel = (model: string) =>
         (prefix ? `${prefix}_${model}` : model).toLowerCase();
@@ -214,7 +239,18 @@ export const elasticsearchAdapter = (
             entry.fromDeleted = true;
           }
         }
-        return { migrated };
+        // Every run, so rows written before their model had reservations, or
+        // while a field was in `skipUniqueFor`, get them.
+        const duplicates: DuplicateValues[] = [];
+        for (const [model, table] of Object.entries(schema)) {
+          duplicates.push(
+            ...(await reservations.backfill(
+              model,
+              indexForModel(table.modelName),
+            )),
+          );
+        }
+        return { migrated, duplicates };
       };
 
       /**
@@ -315,6 +351,140 @@ export const elasticsearchAdapter = (
         };
       };
 
+      /**
+       * Writes every row matching `query` with `writePage`, a page of rows at
+       * a time, and returns how many it wrote. `writePage` sends one bulk
+       * request whose writes are conditional on each row being unchanged
+       * since the search, and returns its items in the order of the rows.
+       *
+       * Not a by-query write: that skips rows that change under it, and since
+       * updated rows usually still match, a rerun cannot tell the skipped
+       * rows from the ones it already updated. Instead only the rows that lost
+       * that race are searched for again, so every row is written and counted
+       * once. A row whose write Elasticsearch rejected under load, or refused
+       * while migrate() moves the index, was not written and goes again the
+       * same way.
+       */
+      const writeMatchingRows = async ({
+        model,
+        index,
+        query,
+        operation,
+        source,
+        writePage,
+      }: {
+        model: string;
+        index: string;
+        query: object;
+        operation: "updateMany" | "deleteMany";
+        /** The stored fields `writePage` needs, or false for none. */
+        source: string[] | false;
+        writePage: (
+          hits: estypes.SearchHit<SourceDoc>[],
+        ) => Promise<(estypes.BulkResponseItem | undefined)[]>;
+      }) => {
+        const [writing, written] =
+          operation === "updateMany"
+            ? ["updating", "updated"]
+            : ["deleting", "deleted"];
+        let count = 0;
+        let retryIds: string[] | undefined;
+        // Passes that waited out a write block do not count towards
+        // MAX_MANY_PASSES; the write block timeout bounds them instead.
+        const pauseWhileBlocked = writeBlockWaiter(writeBlockTimeoutMs, index);
+        let pass = 0;
+        while (pass < MAX_MANY_PASSES) {
+          const passQuery = retryIds
+            ? { bool: { filter: [query, { ids: { values: retryIds } }] } }
+            : query;
+          const unwrittenIds: string[] = [];
+          let rejected = false;
+          let blockedBy: unknown;
+
+          // Paging by id needs no point in time: ids are unique and never
+          // change, so no row is read twice, and a row that changes on a
+          // later page is read as changed.
+          let searchAfter: estypes.SortResults | undefined;
+          while (true) {
+            const page = await withRetry(() =>
+              client.search<SourceDoc>({
+                index,
+                query: passQuery,
+                size: UPDATE_MANY_PAGE_SIZE,
+                sort: [{ id: "asc" }],
+                search_after: searchAfter,
+                _source: source,
+                seq_no_primary_term: true,
+                track_total_hits: false,
+              }),
+            );
+            const hits = page.hits.hits;
+            if (hits.length === 0) break;
+            searchAfter = hits[hits.length - 1]?.sort;
+
+            // Not retried, like the other conditional writes. Each row is
+            // written to the index it was read from, as in `findVersioned`.
+            for (const outcome of await writePage(hits)) {
+              if (isWriteBlocked(outcome) && outcome?._id) {
+                unwrittenIds.push(outcome._id);
+                blockedBy = outcome.error;
+              } else if (
+                (outcome?.status === 409 || outcome?.status === 429) &&
+                outcome._id
+              ) {
+                unwrittenIds.push(outcome._id);
+                rejected ||= outcome.status === 429;
+              } else if (outcome?.status === 404) {
+                // Another request deleted the row.
+              } else if (!outcome || outcome.error) {
+                throw new Error(
+                  `${operation} on "${model}" failed after ${writing} ${count} rows: ${outcome?.error?.reason ?? outcome?.error?.type ?? "unexpected bulk response"}`,
+                );
+              } else {
+                count++;
+              }
+            }
+            if (hits.length < UPDATE_MANY_PAGE_SIZE) break;
+          }
+
+          if (unwrittenIds.length === 0) return count;
+          retryIds = unwrittenIds;
+          // Make the writes that won searchable, so the next pass sees
+          // whether those rows still match and what to condition on. Even
+          // with "immediate" refresh a winner may not have refreshed yet.
+          await withRetry(() => client.indices.refresh({ index }));
+          if (blockedBy) {
+            await pauseWhileBlocked(
+              blockedBy,
+              `${operation} on "${model}" had ${written} ${count} rows.`,
+            );
+            continue;
+          }
+          // Give an overloaded cluster a growing, jittered while to drain.
+          if (rejected) await wait((0.5 + Math.random()) * 50 * 2 ** pass);
+          pass++;
+        }
+        throw new Error(
+          `${operation} on "${model}" ${written} ${count} rows, but the remaining matching rows could not be written in ${MAX_MANY_PASSES} passes: other requests kept changing them or Elasticsearch kept rejecting the writes`,
+        );
+      };
+
+      /** The conditional bulk action that writes `hit` where it was read. */
+      const ifUnchanged = (hit: estypes.SearchHit<SourceDoc>) => ({
+        _index: hit._index,
+        _id: hit._id,
+        if_seq_no: hit._seq_no,
+        if_primary_term: hit._primary_term,
+      });
+
+      /** The ids of the rows whose bulk item says they were written. */
+      const writtenIds = (outcomes: (estypes.BulkResponseItem | undefined)[]) =>
+        outcomes.flatMap((outcome) =>
+          outcome?._id && !outcome.error && outcome.status < 300
+            ? [outcome._id]
+            : [],
+        );
+
       return {
         options: { [MIGRATOR]: migrator },
         createSchema,
@@ -344,6 +514,9 @@ export const elasticsearchAdapter = (
                     ...row.ifUnchanged,
                     refresh,
                   });
+                  await reservations.release(model, index, [
+                    { id: row.id, source: row.source },
+                  ]);
                   return normalizeHit({
                     _id: row.id,
                     _source: row.source,
@@ -378,6 +551,14 @@ export const elasticsearchAdapter = (
           increment: Record<string, number>;
           set?: Record<string, unknown>;
         }) => {
+          // Claiming a value needs the row's current one, which the scripted
+          // update never reads back before it writes.
+          const unique = set && reservations.constrainedFieldIn(model, set);
+          if (unique) {
+            throw new Error(
+              `incrementOne cannot set "${unique}" on "${model}", as it is a unique field; use update instead.`,
+            );
+          }
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
           const params = { increment, set: set ?? {} };
@@ -440,17 +621,49 @@ export const elasticsearchAdapter = (
             id,
           };
 
+          const write = () =>
+            withRetry(() =>
+              client.index({
+                index,
+                id,
+                op_type: "create",
+                refresh,
+                document: source,
+              }),
+            );
+          const values = reservations.valuesOf(model, source);
+          const claims =
+            values.length > 0 ? reservations.claims(model, index) : undefined;
+
           try {
-            await whileMigrating(index, () =>
-              withRetry(() =>
-                client.index({
-                  index,
-                  id,
-                  op_type: "create",
-                  refresh,
-                  document: source,
-                }),
-              ),
+            await whileMigrating<unknown>(
+              index,
+              claims
+                ? async () => {
+                    // Claimed again on a rerun, which re-stamps the claims.
+                    await claims.claim([{ id, claim: values }]);
+                    try {
+                      await write();
+                    } catch (error) {
+                      await claims.failed(id, error);
+                      throw error;
+                    }
+                    // A row written long after its claim may have lost a
+                    // value to another write taking it for an orphan.
+                    const lost = await claims.lost();
+                    if (lost !== undefined) {
+                      await whileMigrating(index, () =>
+                        withRetry(() =>
+                          client.delete({ index, id, refresh }),
+                        ).catch((error) => {
+                          if (!isNotFound(error)) throw error;
+                        }),
+                      );
+                      await claims.unwritten([id]);
+                      throw duplicateError(model, lost);
+                    }
+                  }
+                : write,
             );
           } catch (error) {
             if (isVersionConflict(error)) {
@@ -562,6 +775,10 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
+          // Created once, so a rerun after a write block knows which of its
+          // claims an earlier run created.
+          const claims = reservations.claims(model, index);
+
           // Conditional on the row read, so a blocked write reads again.
           return whileMigrating(index, async () => {
             const row = await findVersioned(index, query);
@@ -573,14 +790,28 @@ export const elasticsearchAdapter = (
               id: (row.source.id as string | undefined) ?? row.id,
             };
 
-            await withRetry(() =>
-              client.index({
-                id: row.id,
-                document: mergedDocument,
-                ...row.ifUnchanged,
-                refresh,
-              }),
+            const change = reservations.changeOf(
+              model,
+              row.id,
+              row.source,
+              update as SourceDoc,
             );
+            if (change) await claims.claim([change]);
+
+            try {
+              await withRetry(() =>
+                client.index({
+                  id: row.id,
+                  document: mergedDocument,
+                  ...row.ifUnchanged,
+                  refresh,
+                }),
+              );
+            } catch (error) {
+              if (change) await claims.failed(row.id, error);
+              throw error;
+            }
+            if (change) await claims.written([row.id]);
 
             return mergedDocument as T;
           });
@@ -602,114 +833,62 @@ export const elasticsearchAdapter = (
             source: SET_FIELDS_SCRIPT,
             params: { fields: update },
           };
+          const writeRows = async (hits: estypes.SearchHit<SourceDoc>[]) => {
+            const result = await client.bulk({
+              index,
+              refresh,
+              operations: hits.flatMap((hit) => [
+                { update: ifUnchanged(hit) },
+                { script },
+              ]),
+            });
+            return result.items.map((item) => item.update);
+          };
 
-          // Not an update-by-query: it skips rows that change under it, and
-          // since updated rows usually still match, a rerun cannot tell the
-          // skipped rows from the ones it already updated. Instead each row
-          // is updated only if unchanged since the search found it, and only
-          // the rows that lost that race are searched for again, so every
-          // row is updated and counted once. A row whose write Elasticsearch
-          // rejected under load, or refused while migrate() moves the index,
-          // was not written and goes again the same way.
-          let updated = 0;
-          let retryIds: string[] | undefined;
-          // Passes that waited out a write block do not count towards
-          // MAX_MANY_PASSES; the write block timeout bounds them instead.
-          const pauseWhileBlocked = writeBlockWaiter(
-            writeBlockTimeoutMs,
-            index,
-          );
-          let pass = 0;
-          while (pass < MAX_MANY_PASSES) {
-            const passQuery = retryIds
-              ? { bool: { filter: [query, { ids: { values: retryIds } }] } }
-              : query;
-            const unwrittenIds: string[] = [];
-            let rejected = false;
-            let blockedBy: unknown;
-
-            // Paging by id needs no point in time: ids are unique and never
-            // change, so no row is read twice, and a row that changes on a
-            // later page is read as changed.
-            let searchAfter: estypes.SortResults | undefined;
-            while (true) {
-              const page = await withRetry(() =>
-                client.search({
-                  index,
-                  query: passQuery,
-                  size: UPDATE_MANY_PAGE_SIZE,
-                  sort: [{ id: "asc" }],
-                  search_after: searchAfter,
-                  _source: false,
-                  seq_no_primary_term: true,
-                  track_total_hits: false,
-                }),
-              );
-              const hits = page.hits.hits;
-              if (hits.length === 0) break;
-              searchAfter = hits[hits.length - 1]?.sort;
-
-              // Not retried, like the other conditional writes. Each row is
-              // written to the index it was read from, as in `findVersioned`.
-              const result = await client.bulk({
-                index,
-                refresh,
-                operations: hits.flatMap((hit) => [
-                  {
-                    update: {
-                      _index: hit._index,
-                      _id: hit._id,
-                      if_seq_no: hit._seq_no,
-                      if_primary_term: hit._primary_term,
-                    },
-                  },
-                  { script },
-                ]),
-              });
-              for (const item of result.items) {
-                const outcome = item.update;
-                if (isWriteBlocked(outcome) && outcome?._id) {
-                  unwrittenIds.push(outcome._id);
-                  blockedBy = outcome.error;
-                } else if (
-                  (outcome?.status === 409 || outcome?.status === 429) &&
-                  outcome._id
-                ) {
-                  unwrittenIds.push(outcome._id);
-                  rejected ||= outcome.status === 429;
-                } else if (outcome?.status === 404) {
-                  // Another request deleted the row.
-                } else if (!outcome || outcome.error) {
-                  throw new Error(
-                    `updateMany on "${model}" failed after updating ${updated} rows: ${outcome?.error?.reason ?? outcome?.error?.type ?? "unexpected bulk response"}`,
-                  );
-                } else {
-                  updated++;
-                }
-              }
-              if (hits.length < UPDATE_MANY_PAGE_SIZE) break;
-            }
-
-            if (unwrittenIds.length === 0) return updated;
-            retryIds = unwrittenIds;
-            // Make the writes that won searchable, so the next pass sees
-            // whether those rows still match and what to condition on. Even
-            // with "immediate" refresh a winner may not have refreshed yet.
-            await withRetry(() => client.indices.refresh({ index }));
-            if (blockedBy) {
-              await pauseWhileBlocked(
-                blockedBy,
-                `updateMany on "${model}" had updated ${updated} rows.`,
-              );
-              continue;
-            }
-            // Give an overloaded cluster a growing, jittered while to drain.
-            if (rejected) await wait((0.5 + Math.random()) * 50 * 2 ** pass);
-            pass++;
+          // Every field of a unique index the update touches, since the new
+          // combination includes the fields it leaves alone.
+          const unique = reservations.fieldsOf(model, update);
+          if (unique.length === 0) {
+            return writeMatchingRows({
+              model,
+              index,
+              query,
+              operation: "updateMany",
+              source: false,
+              writePage: writeRows,
+            });
           }
-          throw new Error(
-            `updateMany on "${model}" updated ${updated} rows, but the remaining matching rows could not be written in ${MAX_MANY_PASSES} passes: other requests kept changing them or Elasticsearch kept rejecting the writes`,
-          );
+
+          // Each page's rows claim their new values in one request before
+          // they are written, and release their old ones in one after.
+          return writeMatchingRows({
+            model,
+            index,
+            query,
+            operation: "updateMany",
+            source: unique,
+            writePage: async (hits) => {
+              const changes = hits.flatMap((hit) => {
+                const change = hit._id
+                  ? reservations.changeOf(model, hit._id, hit._source, update)
+                  : undefined;
+                return change ? [change] : [];
+              });
+              const claims = reservations.claims(model, index);
+              await claims.claim(changes);
+              const outcomes = await writeRows(hits);
+              const written = new Set(writtenIds(outcomes));
+              await claims.written(written);
+              // Bulk items are not retried, so a row reported unwritten was
+              // not written; a later pass claims its values again.
+              await claims.unwritten(
+                changes
+                  .map((change) => change.id)
+                  .filter((id) => !written.has(id)),
+              );
+              return outcomes;
+            },
+          });
         },
         delete: async ({
           model,
@@ -723,14 +902,14 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
-          await whileMigrating(index, async () => {
+          const deleted = await whileMigrating(index, async () => {
             const searchResult = await withRetry(() =>
               client.search<SourceDoc>({ index, query, size: 1 }),
             );
 
             const hit = searchResult.hits.hits[0];
             const hitId = hit?._id;
-            if (!hit || !hitId) return;
+            if (!hit || !hitId) return undefined;
 
             await withRetry(() =>
               client.delete({
@@ -739,7 +918,9 @@ export const elasticsearchAdapter = (
                 refresh,
               }),
             );
+            return { id: hitId, source: hit._source };
           });
+          if (deleted) await reservations.release(model, index, [deleted]);
         },
         deleteMany: async ({
           model,
@@ -750,6 +931,39 @@ export const elasticsearchAdapter = (
         }) => {
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
+
+          // Releasing a row's values needs them, which a by-query delete does
+          // not return, so these rows are deleted a page at a time.
+          const unique = reservations.fieldsOf(model);
+          if (unique.length > 0) {
+            return writeMatchingRows({
+              model,
+              index,
+              query,
+              operation: "deleteMany",
+              source: unique,
+              writePage: async (hits) => {
+                // Refreshed like the by-query delete, which cannot wait.
+                const result = await client.bulk({
+                  index,
+                  refresh: true,
+                  operations: hits.map((hit) => ({ delete: ifUnchanged(hit) })),
+                });
+                const outcomes = result.items.map((item) => item.delete);
+                const written = new Set(writtenIds(outcomes));
+                await reservations.release(
+                  model,
+                  index,
+                  hits.flatMap((hit) =>
+                    hit._id && written.has(hit._id)
+                      ? [{ id: hit._id, source: hit._source }]
+                      : [],
+                  ),
+                );
+                return outcomes;
+              },
+            });
+          }
 
           // A row that changes mid-pass is skipped as a version conflict, so
           // rerun until a pass meets none. Rows already deleted no longer

@@ -53,6 +53,7 @@ Indices are created on first use.
 | `numberOfShards`      | `1`           | Primary shards per index.                                         |
 | `numberOfReplicas`    | `0`           | Replicas per index.                                               |
 | `debugLogs`           | `false`       | Better Auth adapter debug logging.                                |
+| `skipUniqueFor`       | `["session.token"]` | Unique fields left unenforced, as `"model.field"`. Replaces the default. |
 
 ### Refresh
 
@@ -103,7 +104,7 @@ npx auth generate --output elasticsearch-mappings.json
 ```ts
 import { migrate } from "better-auth-elasticsearch";
 
-const { migrated } = await migrate(auth);
+const { migrated, duplicates } = await migrate(auth);
 ```
 
 For each model whose field types changed, `migrate()` creates the next index
@@ -113,6 +114,10 @@ instead of failing. A value that cannot be converted rolls the migration back.
 
 The old index is kept for rollback; pass `{ deleteOldIndices: true }` to remove
 it. Running `migrate()` again is safe.
+
+`migrate()` also reserves the unique values of rows written before they were
+enforced (see [Caveats](#caveats)). `duplicates` lists values that several
+rows already share, by row id; resolve those by hand.
 
 ## Purging expired rows
 
@@ -127,14 +132,22 @@ const { session, verification } = await purgeExpired(auth);
 
 `migrate()` and `purgeExpired()` work in plain Node scripts.
 
-## Limitations
+## Caveats
 
-- **Numeric ids** are not supported; ids are strings.
-- **Transactions** are not supported.
-- **Unique constraints** are enforced on `id` only. Other `unique` fields, such
-  as `email`, rely on Better Auth's own checks, which concurrent requests can
-  race.
-- **Joins** use Better Auth's fallback queries rather than native joins.
+- **Ids are strings.** Elasticsearch has no auto-increment, so Better Auth's
+  numeric id option (`generateId: "serial"`) cannot be used.
+- **No transactions.** Elasticsearch has none, so Better Auth runs multi-step
+  operations one write at a time. If one fails midway, earlier writes stay.
+- **Unique fields are reserved.** Each value of a `unique` field, such as
+  `email`, is reserved in a `<alias>_unique` index, so concurrent requests
+  cannot both take it. Unique indexes are covered too, including compound
+  ones, which reserve each combination of values. Values are compared exactly
+  as stored. A value left reserved by a crashed write is freed after two
+  minutes. Fields listed in `skipUniqueFor` are not enforced; name a
+  compound index as `"model.fieldA+fieldB"`. Run `migrate()` once to reserve rows
+  written by an earlier version.
+- **Joins work**, through Better Auth's follow-up queries, since Elasticsearch
+  has no joins of its own.
 
 ## Contributing
 

@@ -36,7 +36,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.es8.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "BETTER_AUTH_FORCE_ELASTIC_TESTS=true vitest run test/elasticsearch-adapter.test.mjs test/mappings.test.mjs test/migrate.test.mjs test/purge.test.mjs",
+    "test:integration": "BETTER_AUTH_FORCE_ELASTIC_TESTS=true vitest run test/elasticsearch-adapter.test.mjs test/mappings.test.mjs test/migrate.test.mjs test/purge.test.mjs test/unique-reservations.test.mjs",
     "lint": "biome check .",
     "lint:fix": "biome check . --write",
     "format": "biome format . --write",
