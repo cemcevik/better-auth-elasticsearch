@@ -234,6 +234,51 @@ describe("index layout and mappings", () => {
     expect(Object.keys(aliases)).toEqual([`${indexPrefix}_members_v1`]);
   });
 
+  it("generates the mappings a freshly created index has, one entry per model", async () => {
+    const options = {
+      plugins: [username()],
+      user: {
+        modelName: "members",
+        additionalFields: { score: { type: "number" } },
+      },
+    };
+    const { adapter, indexPrefix } = freshAdapter(options);
+
+    const { code, path, overwrite } = await adapter.createSchema(options);
+
+    expect(path).toBe("elasticsearch-mappings.json");
+    expect(overwrite).toBe(true);
+    const generated = JSON.parse(code);
+    expect(Object.keys(generated).sort()).toEqual([
+      "account",
+      "session",
+      "user",
+      "verification",
+    ]);
+    expect(generated.user.alias).toBe(`${indexPrefix}_members`);
+    expect(generated.user.mappings.properties.username).toEqual({
+      type: "keyword",
+      ignore_above: 8191,
+    });
+    for (const [model, { alias, mappings }] of Object.entries(generated)) {
+      await adapter.count({ model });
+      const live = await client.indices.getMapping({ index: alias });
+      // Elasticsearch reports `dynamic` as a string.
+      expect(Object.values(live)[0].mappings).toEqual({
+        ...mappings,
+        dynamic: String(mappings.dynamic),
+      });
+    }
+  });
+
+  it("puts the generated mappings at the path passed to the command", async () => {
+    const { adapter } = freshAdapter();
+
+    const { path } = await adapter.createSchema({}, "schema/es.json");
+
+    expect(path).toBe("schema/es.json");
+  });
+
   it("lowercases the alias of a model name with capitals", async () => {
     const { indexPrefix, adapter } = freshAdapter({
       user: { modelName: "teamMembers" },

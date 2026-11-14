@@ -50,6 +50,12 @@ export const expectedProperties = (
   return properties;
 };
 
+/** The mappings a new versioned index is created with: dynamic mapping off. */
+export const expectedMappings = (properties: MappingProperties) => ({
+  dynamic: false as const,
+  properties,
+});
+
 /** The type Elasticsearch reports for a property; objects may omit it. */
 const typeOf = (property: MappingProperty): string => property.type ?? "object";
 
@@ -142,7 +148,7 @@ const createVersionedIndex = async (
       number_of_replicas: numberOfReplicas,
       ...(lifecyclePolicy ? { lifecycle: { name: lifecyclePolicy } } : {}),
     },
-    mappings: { dynamic: false, properties: expected },
+    mappings: expectedMappings(expected),
   });
 };
 

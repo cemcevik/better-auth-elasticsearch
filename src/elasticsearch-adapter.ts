@@ -6,6 +6,7 @@ import {
   type DBAdapterDebugLogOption,
   createAdapterFactory,
 } from "better-auth/adapters";
+import type { BetterAuthDBSchema } from "better-auth/db";
 
 import {
   isNotFound,
@@ -19,6 +20,7 @@ import {
 } from "./elasticsearch-client";
 import {
   ensureAliasedIndex,
+  expectedMappings,
   expectedProperties,
   migrateAliasedIndex,
 } from "./index-layout";
@@ -244,6 +246,33 @@ export const elasticsearchAdapter = (
         return { migrated };
       };
 
+      /**
+       * For `npx auth generate`: the mappings each model's index is created
+       * with, as JSON for review. Nothing reads the file back.
+       */
+      const createSchema = async ({
+        file,
+        tables,
+      }: {
+        file?: string;
+        tables: BetterAuthDBSchema;
+      }) => {
+        const models = Object.fromEntries(
+          Object.entries(tables).map(([model, table]) => [
+            model,
+            {
+              alias: indexForModel(table.modelName),
+              mappings: expectedMappings(expectedProperties(tables, model)),
+            },
+          ]),
+        );
+        return {
+          code: `${JSON.stringify(models, null, 2)}\n`,
+          path: file ?? "elasticsearch-mappings.json",
+          overwrite: true,
+        };
+      };
+
       // The factory passes `select` with schema field names; the document
       // stores them under their database names.
       const sourceFor = (model: string, select?: string[]) =>
@@ -317,6 +346,7 @@ export const elasticsearchAdapter = (
 
       return {
         options: { [MIGRATOR]: migrator },
+        createSchema,
         // Deletes the row only if it is unchanged since the search found it.
         // A lost race searches again, since the row may have been updated
         // rather than consumed; a row another caller deleted yields null.
