@@ -3,43 +3,67 @@ name: CI
 on:
   push:
     branches:
+      - main
       - dev
+  pull_request:
+    branches:
+      - main
+      - dev
+  # Weekly run against the newest better-auth, to catch upstream contract
+  # changes before users do.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
+    name: Elasticsearch ${{ matrix.server }} (client ${{ matrix.client }}.x)
     runs-on: ubuntu-latest
-    services:
-      elasticsearch:
-        image: docker.elastic.co/elasticsearch/elasticsearch:8.17.2
-        env:
-          discovery.type: single-node
-          xpack.security.enabled: "false"
-          ES_JAVA_OPTS: -Xms512m -Xmx512m
-        ports:
-          - 9200:9200
-        options: >-
-          --health-cmd="curl -fs http://localhost:9200/_cluster/health || exit 1"
-          --health-interval=10s
-          --health-timeout=10s
-          --health-retries=30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # An 8.19 server rejects the 9.x client, so each server is tested
+          # with its own client major.
+          - server: 8.19.25
+            client: 8
+          - server: 9.5.5
+            client: 9
+    env:
+      ES_VERSION: ${{ matrix.server }}
+      ELASTIC_PASSWORD: ci-password
+      ELASTICSEARCH_URL: http://127.0.0.1:9200
+      ELASTICSEARCH_USERNAME: elastic
+      ELASTICSEARCH_PASSWORD: ci-password
+      ELASTICSEARCH_CLIENT_MAJOR: ${{ matrix.client }}
 
     steps:
       - uses: actions/checkout@v6
+      - name: Start Elasticsearch
+        run: docker compose up -d --wait
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Use the newest better-auth
+        if: github.event_name == 'schedule'
+        run: pnpm add --save-dev --ignore-scripts better-auth@latest @better-auth/test-utils@latest
       - name: Lint
         run: pnpm lint
       - name: Typecheck
         run: pnpm typecheck
       - name: Build
         run: pnpm build
-      - name: Integration tests
+      - name: Tests
         env:
-          ELASTICSEARCH_URL: http://127.0.0.1:9200
           BETTER_AUTH_FORCE_ELASTIC_TESTS: "true"
-        run: pnpm test:integration
+        run: pnpm test
+      - name: Elasticsearch logs
+        if: failure()
+        run: docker compose logs elasticsearch

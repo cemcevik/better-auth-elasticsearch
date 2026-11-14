@@ -3,7 +3,11 @@
 #
 #   docker compose up -d --wait
 #
-# Override the server version or password with ES_VERSION / ELASTIC_PASSWORD.
+# Override the server version, password or host port with ES_VERSION,
+# ELASTIC_PASSWORD or ES_PORT. The supported servers are 9.x (the default) and
+# 8.19; test 8.19 with the 8.x client (ELASTICSEARCH_CLIENT_MAJOR=8):
+#
+#   ES_VERSION=8.19.25 ES_PORT=9208 docker compose -p adapter-es8 up -d --wait
 services:
   elasticsearch:
     image: elasticsearch:${ES_VERSION:-9.5.5}
@@ -17,7 +21,7 @@ services:
       cluster.routing.allocation.disk.threshold_enabled: "false"
       ES_JAVA_OPTS: -Xms512m -Xmx512m
     ports:
-      - 127.0.0.1:9200:9200
+      - 127.0.0.1:${ES_PORT:-9200}:9200
     healthcheck:
       test:
         - CMD-SHELL

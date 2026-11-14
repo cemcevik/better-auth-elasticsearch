@@ -14,7 +14,7 @@
   "files": ["dist"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.es8.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "BETTER_AUTH_FORCE_ELASTIC_TESTS=true vitest run test/elasticsearch-adapter.test.mjs test/mappings.test.mjs test/migrate.test.mjs test/purge.test.mjs",
@@ -35,13 +35,14 @@
     "node": ">=22"
   },
   "peerDependencies": {
-    "@elastic/elasticsearch": "^9.3.4",
+    "@elastic/elasticsearch": "^8.19.0 || ^9.0.0",
     "better-auth": "^1.7.23"
   },
   "devDependencies": {
     "@better-auth/test-utils": "1.7.23",
     "@biomejs/biome": "^1.9.4",
     "@elastic/elasticsearch": "^9.5.1",
+    "@elastic/elasticsearch-8": "npm:@elastic/elasticsearch@8.19.2",
     "@types/node": "^24.19.2",
     "better-auth": "1.7.23",
     "typescript": "^5.9.3",

@@ -10,6 +10,10 @@ pnpm add @cemcevik/better-auth-elasticsearch better-auth @elastic/elasticsearch
 
 `better-auth` and `@elastic/elasticsearch` are peer dependencies.
 
+Supported Elasticsearch servers are 8.19 and 9.x. Install the client major that
+matches your server: `@elastic/elasticsearch@8` for an 8.19 server (it rejects
+the 9.x client), `@elastic/elasticsearch@9` for a 9.x server.
+
 ## Usage
 
 ```ts
@@ -75,11 +79,27 @@ pnpm test:integration
 docker compose down
 ```
 
-Set `ES_VERSION` to choose the server image tag (default `9.5.5`).
+Set `ES_VERSION` to choose the server image tag (default `9.5.5`). To test an
+8.19 server, run it with the 8.x client (installed as the dev dependency
+`@elastic/elasticsearch-8`); `ES_PORT` and a separate project name let it run
+next to the 9.x one:
+
+```bash
+ES_VERSION=8.19.25 ES_PORT=9208 docker compose -p adapter-es8 up -d --wait
+ELASTICSEARCH_URL=http://127.0.0.1:9208 \
+ELASTICSEARCH_USERNAME=elastic \
+ELASTICSEARCH_PASSWORD=changeme \
+ELASTICSEARCH_CLIENT_MAJOR=8 \
+pnpm test:integration
+docker compose -p adapter-es8 down
+```
+
+`pnpm typecheck` checks the source against both client majors.
 
 ## CI / Release Flow
 
-- Push to `dev`: runs CI (Biome, typecheck, build, integration tests with Elasticsearch service).
+- Push or pull request to `main` or `dev`: runs CI (Biome, typecheck, build, all tests) in two jobs, Elasticsearch 8.19 with the 8.x client and 9.x with the 9.x client, both with basic auth on.
+- Weekly (Monday 06:00 UTC): the same jobs against the newest published better-auth.
 - Push to `main`: runs CI, bumps patch version, commits version bump, and publishes to npm.
 - Publish step is guarded to skip if the target version already exists on npm.
 

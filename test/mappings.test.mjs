@@ -27,11 +27,11 @@ describe("index layout and mappings", () => {
   }
 
   const client = createClient();
-  const prefixes = [];
+  const prefixes = new Set();
 
   /** An adapter on a fresh prefix, built from the given better-auth options. */
   const freshAdapter = (options = {}, indexPrefix = uniquePrefix()) => {
-    prefixes.push(indexPrefix);
+    prefixes.add(indexPrefix);
     return {
       indexPrefix,
       adapter: elasticsearchAdapter({ client, indexPrefix })(options),
@@ -40,7 +40,7 @@ describe("index layout and mappings", () => {
 
   afterAll(async () => {
     await Promise.all(
-      prefixes.map((prefix) => deleteTestIndices(client, prefix)),
+      [...prefixes].map((prefix) => deleteTestIndices(client, prefix)),
     );
   });
 

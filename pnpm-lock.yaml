@@ -17,6 +17,9 @@ importers:
       '@elastic/elasticsearch':
         specifier: ^9.5.1
         version: 9.5.1(apache-arrow@21.1.0)
+      '@elastic/elasticsearch-8':
+        specifier: npm:@elastic/elasticsearch@8.19.2
+        version: '@elastic/elasticsearch@8.19.2'
       '@types/node':
         specifier: ^24.19.2
         version: 24.19.2
@@ -175,6 +178,10 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@elastic/elasticsearch@8.19.2':
+    resolution: {integrity: sha512-LMJCju/+AZkDlJArd/MYABWTDrHi4U7j3qGTKi1hYC7+67SaiYmYFItiueACQVrj2j3ECPMcguZ+7WrZeB+Z5g==}
+    engines: {node: '>=20'}
+
   '@elastic/elasticsearch@9.5.1':
     resolution: {integrity: sha512-2ZZqCmgGPjSYn+OphFRYm9g46KVINA0i8fRmlPHJC60RvJeFB6NSHO0nKKOOYhm3WRXyGkLu1xkdXe724fnmnA==}
     engines: {node: '>=22'}
@@ -183,6 +190,10 @@ packages:
     peerDependenciesMeta:
       apache-arrow:
         optional: true
+
+  '@elastic/transport@8.11.0':
+    resolution: {integrity: sha512-1QD1j7gQF8+tVrf+UOcOrLF1LXnhBYwBnNl4xd+fYxkQONjaOjiTcfqXcALHesKezUv8wRzv3tedEnhtYLBmhw==}
+    engines: {node: '>=18'}
 
   '@elastic/transport@9.6.0':
     resolution: {integrity: sha512-6vDa4mrBACVNu85jdLCDA6xpbjLoHbbvus7QgnRdz//zuFdJbFFVd+qOJDmJGhAgph05kLtkyyv2Ndo/xl0X5w==}
@@ -726,6 +737,9 @@ packages:
   rou3@0.9.2:
     resolution: {integrity: sha512-3SOzvaAg8rkHrXtRjpCvCvbyO5to9oOO27Z/XqHEYXfMRVSw/qMIVdmaOk9W2lcRLtR6dlqTjo9hDeJk70QBYQ==}
 
+  secure-json-parse@3.0.2:
+    resolution: {integrity: sha512-H6nS2o8bWfpFEV6U38sOSjS7bTbdgbCGU9wEM6W14P5H0QOsz94KCusifV44GpHDTu2nqZbuDNhTzu+mjDSw1w==}
+
   secure-json-parse@4.1.1:
     resolution: {integrity: sha512-lnd81MQEZKjhW/Gd2TQqdd4XP6QYNdDW/EP+I7nTrFHP9y2LmaGPIHk9xsnzcOiEr1c39c/e84xFgGviQKBTRw==}
 
@@ -789,6 +803,10 @@ packages:
 
   undici-types@7.24.6:
     resolution: {integrity: sha512-WRNW+sJgj5OBN4/0JpHFqtqzhpbnV0GuB+OozA9gCL7a993SmU+1JBZCzLNxYsbMfIeDL+lTsphD5jN5N+n0zg==}
+
+  undici@6.29.1:
+    resolution: {integrity: sha512-EvRlUt/QqAEvXdQeRMYUfwOQsfzpDztykrG2owGEE/rBOBoYv9uF39ZzsNDh4lTFHhTr2XOZjKkYgueD12ZmGA==}
+    engines: {node: '>=18.17'}
 
   undici@7.30.2:
     resolution: {integrity: sha512-mLyPQnHwUxaM/rideoK/+KL8DaAJLRl4aBCfmX444aCSLnIaomqPLtNRe2jdCYcsk5wZzXrDIQC8ZeYNRAYyIA==}
@@ -995,12 +1013,34 @@ snapshots:
   '@biomejs/cli-win32-x64@1.9.4':
     optional: true
 
+  '@elastic/elasticsearch@8.19.2':
+    dependencies:
+      '@elastic/transport': 8.11.0
+      apache-arrow: 21.1.0
+      tslib: 2.9.1
+    transitivePeerDependencies:
+      - '@75lb/nature'
+      - supports-color
+
   '@elastic/elasticsearch@9.5.1(apache-arrow@21.1.0)':
     dependencies:
       '@elastic/transport': 9.6.0
       tslib: 2.9.1
     optionalDependencies:
       apache-arrow: 21.1.0
+    transitivePeerDependencies:
+      - supports-color
+
+  '@elastic/transport@8.11.0':
+    dependencies:
+      '@opentelemetry/api': 1.10.0
+      '@opentelemetry/core': 2.12.0(@opentelemetry/api@1.10.0)
+      debug: 4.4.3
+      hpagent: 1.2.0
+      ms: 2.1.3
+      secure-json-parse: 3.0.2
+      tslib: 2.9.1
+      undici: 6.29.1
     transitivePeerDependencies:
       - supports-color
 
@@ -1088,19 +1128,16 @@ snapshots:
 
   '@standard-schema/spec@1.1.0': {}
 
-  '@swc/helpers@0.5.24':
-    optional: true
+  '@swc/helpers@0.5.24': {}
 
   '@types/chai@5.2.3':
     dependencies:
       '@types/deep-eql': 4.0.2
       assertion-error: 2.0.1
 
-  '@types/command-line-args@5.2.3':
-    optional: true
+  '@types/command-line-args@5.2.3': {}
 
-  '@types/command-line-usage@5.0.4':
-    optional: true
+  '@types/command-line-usage@5.0.4': {}
 
   '@types/deep-eql@4.0.2': {}
 
@@ -1162,7 +1199,6 @@ snapshots:
   ansi-styles@4.3.0:
     dependencies:
       color-convert: 2.0.1
-    optional: true
 
   apache-arrow@21.1.0:
     dependencies:
@@ -1177,10 +1213,8 @@ snapshots:
       tslib: 2.9.1
     transitivePeerDependencies:
       - '@75lb/nature'
-    optional: true
 
-  array-back@6.2.3:
-    optional: true
+  array-back@6.2.3: {}
 
   assertion-error@2.0.1: {}
 
@@ -1226,21 +1260,17 @@ snapshots:
   chalk-template@0.4.0:
     dependencies:
       chalk: 4.1.2
-    optional: true
 
   chalk@4.1.2:
     dependencies:
       ansi-styles: 4.3.0
       supports-color: 7.2.0
-    optional: true
 
   color-convert@2.0.1:
     dependencies:
       color-name: 1.1.4
-    optional: true
 
-  color-name@1.1.4:
-    optional: true
+  color-name@1.1.4: {}
 
   command-line-args@6.0.2:
     dependencies:
@@ -1248,7 +1278,6 @@ snapshots:
       find-replace: 5.0.2
       lodash.camelcase: 4.3.0
       typical: 7.3.0
-    optional: true
 
   command-line-usage@7.0.4:
     dependencies:
@@ -1256,7 +1285,6 @@ snapshots:
       chalk-template: 0.4.0
       table-layout: 4.1.1
       typical: 7.3.0
-    optional: true
 
   convert-source-map@2.0.0: {}
 
@@ -1280,24 +1308,20 @@ snapshots:
     optionalDependencies:
       picomatch: 4.0.7
 
-  find-replace@5.0.2:
-    optional: true
+  find-replace@5.0.2: {}
 
-  flatbuffers@25.9.23:
-    optional: true
+  flatbuffers@25.9.23: {}
 
   fsevents@2.3.3:
     optional: true
 
-  has-flag@4.0.0:
-    optional: true
+  has-flag@4.0.0: {}
 
   hpagent@1.2.0: {}
 
   jose@6.2.15: {}
 
-  json-bignum@0.0.3:
-    optional: true
+  json-bignum@0.0.3: {}
 
   kysely@0.29.8: {}
 
@@ -1350,8 +1374,7 @@ snapshots:
       lightningcss-win32-arm64-msvc: 1.33.0
       lightningcss-win32-x64-msvc: 1.33.0
 
-  lodash.camelcase@4.3.0:
-    optional: true
+  lodash.camelcase@4.3.0: {}
 
   magic-string@0.30.21:
     dependencies:
@@ -1419,6 +1442,8 @@ snapshots:
 
   rou3@0.9.2: {}
 
+  secure-json-parse@3.0.2: {}
+
   secure-json-parse@4.1.1: {}
 
   set-cookie-parser@3.2.2: {}
@@ -1439,13 +1464,11 @@ snapshots:
   supports-color@7.2.0:
     dependencies:
       has-flag: 4.0.0
-    optional: true
 
   table-layout@4.1.1:
     dependencies:
       array-back: 6.2.3
       wordwrapjs: 5.1.1
-    optional: true
 
   tinybench@2.9.0: {}
 
@@ -1467,10 +1490,11 @@ snapshots:
 
   typescript@5.9.3: {}
 
-  typical@7.3.0:
-    optional: true
+  typical@7.3.0: {}
 
   undici-types@7.24.6: {}
+
+  undici@6.29.1: {}
 
   undici@7.30.2: {}
 
@@ -1527,7 +1551,6 @@ snapshots:
       siginfo: 2.0.0
       stackback: 0.0.2
 
-  wordwrapjs@5.1.1:
-    optional: true
+  wordwrapjs@5.1.1: {}
 
   zod@4.6.7: {}

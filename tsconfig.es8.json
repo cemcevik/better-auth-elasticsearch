@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "@elastic/elasticsearch": ["./node_modules/@elastic/elasticsearch-8"],
+      "@elastic/elasticsearch/*": ["./node_modules/@elastic/elasticsearch-8/*"]
+    }
+  }
+}

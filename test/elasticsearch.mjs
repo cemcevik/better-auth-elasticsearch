@@ -1,6 +1,20 @@
 import { randomUUID } from "node:crypto";
 
-import { Client } from "@elastic/elasticsearch";
+/**
+ * The client major to test with: 9 (default) for a 9.x server, 8 for an 8.19
+ * server, which rejects the 9.x client's compatibility header.
+ */
+const clientMajor = process.env.ELASTICSEARCH_CLIENT_MAJOR ?? "9";
+const clientPackages = {
+  8: "@elastic/elasticsearch-8",
+  9: "@elastic/elasticsearch",
+};
+if (!(clientMajor in clientPackages)) {
+  throw new Error(
+    `ELASTICSEARCH_CLIENT_MAJOR must be 8 or 9, got "${clientMajor}"`,
+  );
+}
+const { Client } = await import(clientPackages[clientMajor]);
 
 /** Connection settings shared by every integration test file. */
 export const elasticUrl = process.env.ELASTICSEARCH_URL;
