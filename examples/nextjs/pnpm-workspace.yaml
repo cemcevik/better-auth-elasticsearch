@@ -1,0 +1,12 @@
+# A standalone project, kept out of the adapter's own pnpm workspace.
+
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver
+
+# No package version younger than 7 days (the value is in minutes), except
+# better-auth's own packages, matching the adapter's policy.
+minimumReleaseAge: 10080
+minimumReleaseAgeExclude:
+  - better-auth
+  - "@better-auth/*"

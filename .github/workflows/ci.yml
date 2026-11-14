@@ -73,3 +73,35 @@ jobs:
       - name: Elasticsearch logs
         if: failure()
         run: docker compose logs elasticsearch
+
+  example:
+    name: Next.js example
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/nextjs
+    # Placeholders: building needs the variables set, not a live server.
+    env:
+      BETTER_AUTH_SECRET: ci-placeholder-secret-at-least-32-chars
+      BETTER_AUTH_URL: http://localhost:3000
+      ELASTICSEARCH_URL: http://127.0.0.1:9200
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            examples/nextjs/pnpm-lock.yaml
+      # Builds and packs the adapter, then installs the tarball as a user
+      # would, so packaging mistakes fail here.
+      - name: Install the packed adapter
+        run: pnpm adapter:install
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Build
+        run: pnpm build
