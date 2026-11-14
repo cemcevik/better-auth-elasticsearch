@@ -8,6 +8,7 @@ import {
 } from "better-auth/adapters";
 
 import { withElasticsearchRetry } from "./elasticsearch-client";
+import { ensureAliasedIndex, expectedProperties } from "./index-layout";
 import { whereToQuery } from "./where-to-query";
 
 type Primitive = string | number | boolean | Date | null;
@@ -26,8 +27,6 @@ export interface ElasticAdapterConfig {
   number_of_shards?: number;
   number_of_replicas?: number;
 }
-
-const CORE_MODELS = ["user", "session", "account", "verification"] as const;
 
 const normalizeHit = (hit: {
   _id?: string;
@@ -64,16 +63,14 @@ export const elasticsearchAdapter = (
       supportsNumericIds: false,
       transaction: false,
     },
-    adapter: ({ getFieldName, getDefaultModelName }) => {
+    adapter: ({ schema, getFieldName, getDefaultModelName }) => {
       const client = config.client;
-      let initialized = false;
 
       const withRetry = <T>(operation: () => Promise<T>) =>
         withElasticsearchRetry(operation, maxRetries);
 
       const indexForModel = (model: string) =>
         prefix ? `${prefix}_${model}` : model;
-      const indexForAlias = (alias: string) => alias;
 
       const putLifecyclePolicyIfNeeded = async (
         model: string,
@@ -111,73 +108,38 @@ export const elasticsearchAdapter = (
         }
       };
 
-      const ensureIndex = async (model: string) => {
-        const alias = indexForModel(model);
-        const index = indexForAlias(alias);
-        const aliasExistsResult = await withRetry(() =>
-          client.indices.existsAlias({ name: alias }),
-        );
+      // One first-use check per model and process. A failed check is
+      // forgotten so the next call tries again.
+      const ready = new Map<string, Promise<void>>();
 
-        if (aliasExistsResult) return;
-
-        const lifecyclePolicy = await putLifecyclePolicyIfNeeded(model);
-
-        const indexExistsResult = await withRetry(() =>
-          client.indices.exists({ index }),
-        );
-
-        if (!indexExistsResult) {
-          await withRetry(() =>
-            client.indices.create({
-              index,
-              settings: {
-                number_of_shards: numberOfShards,
-                number_of_replicas: numberOfReplicas,
-                ...(lifecyclePolicy
-                  ? { lifecycle: { name: lifecyclePolicy } }
-                  : {}),
-              },
-              mappings: {
-                dynamic: true,
-                dynamic_templates: [
-                  {
-                    strings_as_keywords: {
-                      match_mapping_type: "string",
-                      mapping: {
-                        type: "keyword",
-                        ignore_above: 1024,
-                      },
-                    },
-                  },
-                ],
-              },
-            }),
+      /**
+       * The alias for a model, after making sure it exists with the mapping
+       * the schema needs. Aliases are named after the default model name, as
+       * 0.1.x named its indices, so a custom `modelName` does not rename them
+       * and a 0.1.x index is always found.
+       */
+      const ensureAlias = async (model: string) => {
+        const defaultModel = getDefaultModelName(model);
+        const alias = indexForModel(defaultModel);
+        let check = ready.get(alias);
+        if (!check) {
+          check = withRetry(() =>
+            ensureAliasedIndex(
+              client,
+              alias,
+              expectedProperties(schema, defaultModel),
+              async () => ({
+                numberOfShards,
+                numberOfReplicas,
+                lifecyclePolicy: await putLifecyclePolicyIfNeeded(model),
+              }),
+            ),
           );
+          ready.set(alias, check);
+          check.catch(() => ready.delete(alias));
         }
-
-        if (alias !== index) {
-          await withRetry(() =>
-            client.indices.putAlias({
-              index,
-              name: alias,
-              is_write_index: true,
-            }),
-          );
-        }
-      };
-
-      const ensureInitialized = async () => {
-        if (initialized) return;
-        await withRetry(() => client.ping());
-        await Promise.all(CORE_MODELS.map((model) => ensureIndex(model)));
-        initialized = true;
-      };
-
-      const getIndex = async (model: string) => {
-        await ensureInitialized();
-        const index = indexForModel(getDefaultModelName(model));
-        await ensureIndex(getDefaultModelName(model));
-        return index;
+        await check;
+        return alias;
       };
 
       const queryFor = (model: string, where: CleanedWhere[] = []) =>
@@ -197,7 +159,7 @@ export const elasticsearchAdapter = (
           data: T;
           select?: string[];
         }) => {
-          const index = await getIndex(model);
+          const index = await ensureAlias(model);
           const id =
             typeof data.id === "string" && data.id.length > 0
               ? data.id
@@ -230,7 +192,7 @@ export const elasticsearchAdapter = (
           select?: string[];
           join?: Record<string, unknown>;
         }) => {
-          const index = await getIndex(model);
+          const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
           const result = await withRetry(() =>
@@ -262,7 +224,7 @@ export const elasticsearchAdapter = (
           offset?: number;
           join?: Record<string, unknown>;
         }) => {
-          const index = await getIndex(model);
+          const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
           const result = await withRetry(() =>
@@ -299,7 +261,7 @@ export const elasticsearchAdapter = (
           model: string;
           where?: CleanedWhere[];
         }) => {
-          const index = await getIndex(model);
+          const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
           const result = await withRetry(() => client.count({ index, query }));
@@ -315,7 +277,7 @@ export const elasticsearchAdapter = (
           where: CleanedWhere[];
           update: T;
         }) => {
-          const index = await getIndex(model);
+          const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
           const searchResult = await withRetry(() =>
@@ -367,7 +329,7 @@ export const elasticsearchAdapter = (
           where: CleanedWhere[];
           update: Record<string, unknown>;
         }) => {
-          const index = await getIndex(model);
+          const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
           const params = {
@@ -398,7 +360,7 @@ export const elasticsearchAdapter = (
           model: string;
           where: CleanedWhere[];
         }) => {
-          const index = await getIndex(model);
+          const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
           const searchResult = await withRetry(() =>
@@ -424,7 +386,7 @@ export const elasticsearchAdapter = (
           model: string;
           where: CleanedWhere[];
         }) => {
-          const index = await getIndex(model);
+          const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
           const result = await withRetry(() =>
