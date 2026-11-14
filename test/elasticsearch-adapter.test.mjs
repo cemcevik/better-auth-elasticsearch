@@ -209,6 +209,43 @@ const withConcurrentSessionUpdates = async (adapter, rows, whileRunning) => {
   }
 };
 
+/**
+ * Lets a test make Elasticsearch reject writes as it does when its write
+ * queue is full. While `rejectedWrites.next` is above zero, the first row of
+ * a bulk request is not sent and is reported back with status 429.
+ */
+const rejectedWrites = { next: 0 };
+
+const withRejectedWrites = (client) =>
+  new Proxy(client, {
+    get(target, property) {
+      if (property === "bulk") {
+        return async (params) => {
+          if (rejectedWrites.next === 0) return target.bulk(params);
+          rejectedWrites.next--;
+          const [action, , ...rest] = params.operations;
+          const sent =
+            rest.length > 0
+              ? await target.bulk({ ...params, operations: rest })
+              : { errors: false, items: [] };
+          const rejected = {
+            update: {
+              _id: action.update._id,
+              status: 429,
+              error: {
+                type: "es_rejected_execution_exception",
+                reason: "rejected execution of coordinating operation",
+              },
+            },
+          };
+          return { ...sent, errors: true, items: [rejected, ...sent.items] };
+        };
+      }
+      const value = target[property];
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
 /** Single-use reads, counters and by-query writes under concurrent requests. */
 const concurrencyTestSuite = createTestSuite(
   "concurrency",
@@ -390,6 +427,28 @@ const concurrencyTestSuite = createTestSuite(
             expect(after?.count).toBe(0);
           },
         },
+      "updateMany writes a row again after Elasticsearch rejected its write":
+        async () => {
+          const userId = crypto.randomUUID();
+          const rows = await createSessions(userId, 3);
+          const where = [{ field: "userId", value: userId }];
+
+          rejectedWrites.next = 1;
+          const updated = await adapter.updateMany({
+            model: "session",
+            where,
+            update: { userAgent: "revoked" },
+          });
+
+          expect(rejectedWrites.next).toBe(0);
+          expect(updated).toBe(rows.length);
+          expect(
+            await adapter.count({
+              model: "session",
+              where: [...where, { field: "userAgent", value: "revoked" }],
+            }),
+          ).toBe(rows.length);
+        },
       // Revoking all of a user's sessions while one is being refreshed.
       "deleteMany leaves no matching row when the rows change under it":
         async () => {
@@ -452,7 +511,7 @@ describe("elasticsearchAdapter", async () => {
     const indexPrefix = uniquePrefix();
     const createAdapter = () =>
       elasticsearchAdapter({
-        client,
+        client: withRejectedWrites(client),
         indexPrefix,
         debugLogs: { isRunningAdapterTests: true },
         ...adapterOptions,

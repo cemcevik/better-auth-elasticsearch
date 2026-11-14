@@ -11,6 +11,7 @@ import {
   isNotFound,
   isVersionConflict,
   retryOnContention,
+  wait,
   withElasticsearchRetry,
 } from "./elasticsearch-client";
 import { ensureAliasedIndex, expectedProperties } from "./index-layout";
@@ -534,14 +535,16 @@ export const elasticsearchAdapter = (
           // skipped rows from the ones it already updated. Instead each row
           // is updated only if unchanged since the search found it, and only
           // the rows that lost that race are searched for again, so every
-          // row is updated and counted once.
+          // row is updated and counted once. A row whose write Elasticsearch
+          // rejected under load was not written and goes again the same way.
           let updated = 0;
           let retryIds: string[] | undefined;
           for (let pass = 0; pass < MAX_MANY_PASSES; pass++) {
             const passQuery = retryIds
               ? { bool: { filter: [query, { ids: { values: retryIds } }] } }
               : query;
-            const conflictedIds: string[] = [];
+            const unwrittenIds: string[] = [];
+            let rejected = false;
 
             // Paging by id needs no point in time: ids are unique and never
             // change, so no row is read twice, and a row that changes on a
@@ -581,8 +584,12 @@ export const elasticsearchAdapter = (
               });
               for (const item of result.items) {
                 const outcome = item.update;
-                if (outcome?.status === 409 && outcome._id) {
-                  conflictedIds.push(outcome._id);
+                if (
+                  (outcome?.status === 409 || outcome?.status === 429) &&
+                  outcome._id
+                ) {
+                  unwrittenIds.push(outcome._id);
+                  rejected ||= outcome.status === 429;
                 } else if (outcome?.status === 404) {
                   // Another request deleted the row.
                 } else if (!outcome || outcome.error) {
@@ -596,15 +603,17 @@ export const elasticsearchAdapter = (
               if (hits.length < UPDATE_MANY_PAGE_SIZE) break;
             }
 
-            if (conflictedIds.length === 0) return updated;
-            retryIds = conflictedIds;
+            if (unwrittenIds.length === 0) return updated;
+            retryIds = unwrittenIds;
             // Make the writes that won searchable, so the next pass sees
             // whether those rows still match and what to condition on. Even
             // with "immediate" refresh a winner may not have refreshed yet.
             await withRetry(() => client.indices.refresh({ index }));
+            // Give an overloaded cluster a growing, jittered while to drain.
+            if (rejected) await wait((0.5 + Math.random()) * 50 * 2 ** pass);
           }
           throw new Error(
-            `updateMany on "${model}" updated ${updated} rows, but other requests kept changing the remaining matching rows through ${MAX_MANY_PASSES} passes`,
+            `updateMany on "${model}" updated ${updated} rows, but the remaining matching rows could not be written in ${MAX_MANY_PASSES} passes: other requests kept changing them or Elasticsearch kept rejecting the writes`,
           );
         },
         delete: async ({

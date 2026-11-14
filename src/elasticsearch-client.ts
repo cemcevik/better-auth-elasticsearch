@@ -61,7 +61,7 @@ const isRetriableError = (error: unknown): boolean => {
   );
 };
 
-const wait = async (milliseconds: number): Promise<void> => {
+export const wait = async (milliseconds: number): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 };
 
