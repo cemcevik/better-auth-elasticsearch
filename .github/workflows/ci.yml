@@ -51,9 +51,13 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
+      # The 7-day package age rule is off here: a fresh better-auth may pull in
+      # fresh dependencies, and this run must fail only on contract changes.
       - name: Use the newest better-auth
         if: github.event_name == 'schedule'
-        run: pnpm add --save-dev --ignore-scripts better-auth@latest @better-auth/test-utils@latest
+        run: >-
+          pnpm add --save-dev --ignore-scripts --config.minimum-release-age=0
+          better-auth@latest @better-auth/test-utils@latest
       - name: Lint
         run: pnpm lint
       - name: Typecheck
