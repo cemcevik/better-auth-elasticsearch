@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.3.0
+
+### Added
+
+- Unique fields other than `id`, such as `user.email`, are enforced. Each
+  value is reserved in a `<alias>_unique` index, so two concurrent requests
+  can no longer both create a row with it. The loser fails with a "duplicate
+  key" error.
+- Unique indexes declared on a table are enforced the same way, including
+  indexes over several fields.
+- The `skipUniqueFor` option lists unique fields to leave unenforced. It
+  defaults to `["session.token"]`, a random value on every sign-in.
+- `migrate(auth)` reserves the unique values of existing rows and returns
+  `duplicates`, the values several rows already share.
+
+### Changed
+
+- `incrementOne` refuses to set a unique field; use `update` instead.
+- `deleteMany` on a model with an enforced unique field deletes page by page
+  instead of by query, to free each row's values.
+
+After upgrading, run `migrate(auth)` once so rows written by 0.2.0 are
+reserved.
+
 ## 0.2.0
 
 Published as `better-auth-elasticsearch`. Earlier versions were published as

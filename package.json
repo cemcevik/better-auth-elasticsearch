@@ -1,6 +1,6 @@
 {
   "name": "better-auth-elasticsearch",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Elasticsearch database adapter for Better Auth",
   "keywords": [
     "better-auth",
