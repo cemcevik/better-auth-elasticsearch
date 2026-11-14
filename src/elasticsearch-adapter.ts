@@ -37,8 +37,6 @@ export interface ElasticAdapterConfig {
   client: Client;
   debugLogs?: DBAdapterDebugLogOption;
   indexPrefix?: string;
-  sessionRetentionDays?: number;
-  verificationRetentionDays?: number;
   maxRetries?: number;
   /**
    * When a write becomes searchable. "immediate" (the default) refreshes the
@@ -114,13 +112,13 @@ export const elasticsearchAdapter = (
   config: ElasticAdapterConfig,
 ): ReturnType<typeof createAdapterFactory> => {
   const prefix = config.indexPrefix ?? "";
-  const sessionRetentionDays = config.sessionRetentionDays ?? 30;
-  const verificationRetentionDays = config.verificationRetentionDays ?? 7;
   const maxRetries = config.maxRetries ?? 3;
   const refresh = config.refresh === "wait_for" ? "wait_for" : true;
   const writeBlockTimeoutMs = config.writeBlockTimeoutMs ?? 30_000;
-  const numberOfShards = config.number_of_shards ?? 1;
-  const numberOfReplicas = config.number_of_replicas ?? 0;
+  const indexSettings = {
+    numberOfShards: config.number_of_shards ?? 1,
+    numberOfReplicas: config.number_of_replicas ?? 0,
+  };
 
   const adapter = createAdapterFactory({
     config: {
@@ -148,48 +146,6 @@ export const elasticsearchAdapter = (
       const indexForModel = (model: string) =>
         (prefix ? `${prefix}_${model}` : model).toLowerCase();
 
-      const putLifecyclePolicyIfNeeded = async (
-        model: string,
-      ): Promise<string | undefined> => {
-        const defaultModel = getDefaultModelName(model);
-        if (defaultModel !== "session" && defaultModel !== "verification") {
-          return undefined;
-        }
-
-        const deleteAfterDays =
-          defaultModel === "session"
-            ? sessionRetentionDays
-            : verificationRetentionDays;
-
-        const policyName = `${indexForModel(defaultModel)}_policy`;
-
-        try {
-          await withRetry(() =>
-            client.ilm.putLifecycle({
-              name: policyName,
-              policy: {
-                phases: {
-                  hot: { actions: {} },
-                  delete: {
-                    min_age: `${deleteAfterDays}d`,
-                    actions: { delete: {} },
-                  },
-                },
-              },
-            }),
-          );
-          return policyName;
-        } catch {
-          return undefined;
-        }
-      };
-
-      const indexSettings = (model: string) => async () => ({
-        numberOfShards,
-        numberOfReplicas,
-        lifecyclePolicy: await putLifecyclePolicyIfNeeded(model),
-      });
-
       // One first-use check per model and process. A failed check is
       // forgotten so the next call tries again.
       const ready = new Map<string, Promise<void>>();
@@ -208,7 +164,7 @@ export const elasticsearchAdapter = (
               client,
               alias,
               expectedProperties(schema, getDefaultModelName(model)),
-              indexSettings(model),
+              indexSettings,
             ),
           );
           ready.set(alias, check);
@@ -229,7 +185,7 @@ export const elasticsearchAdapter = (
             client,
             indexForModel(table.modelName),
             expectedProperties(schema, model),
-            indexSettings(model),
+            indexSettings,
           );
           if (result) migrated.push({ model, ...result, fromDeleted: false });
         }

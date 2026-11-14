@@ -24,7 +24,7 @@ export const createClient = () => {
 export const uniquePrefix = () =>
   `ba_test_${Date.now()}_${randomUUID().slice(0, 8)}`;
 
-/** Deletes every index and lifecycle policy created under a prefix. */
+/** Deletes every index created under a prefix. */
 export const deleteTestIndices = async (client, indexPrefix) => {
   const indices = await client.indices.get({
     index: `${indexPrefix}_*`,
@@ -33,11 +33,4 @@ export const deleteTestIndices = async (client, indexPrefix) => {
   });
   const names = Object.keys(indices);
   if (names.length > 0) await client.indices.delete({ index: names });
-
-  const policies = await client.ilm.getLifecycle();
-  await Promise.all(
-    Object.keys(policies)
-      .filter((name) => name.startsWith(`${indexPrefix}_`))
-      .map((name) => client.ilm.deleteLifecycle({ name })),
-  );
 };

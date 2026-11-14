@@ -8,3 +8,4 @@ export {
   type MigratedModel,
   type MigrationResult,
 } from "./migrate";
+export { purgeExpired, type PurgeResult } from "./purge";

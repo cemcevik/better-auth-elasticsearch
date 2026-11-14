@@ -25,8 +25,6 @@ export const auth = betterAuth({
   database: elasticsearchAdapter({
     client,
     indexPrefix: "better_auth",
-    sessionRetentionDays: 30,
-    verificationRetentionDays: 7,
     maxRetries: 3,
     // "immediate" (default): every write is searchable on return.
     // "wait_for": wait for the next scheduled refresh; less cluster load.
@@ -37,6 +35,24 @@ export const auth = betterAuth({
   }),
 });
 ```
+
+## Purging expired rows
+
+better-auth deletes an expired session only when its token is presented
+again, so the session index keeps growing. `purgeExpired` deletes the session
+and verification rows whose `expiresAt` has passed and reports how many it
+deleted. The adapter runs no background work, so call it from your own
+scheduler:
+
+```ts
+import { purgeExpired } from "@cemcevik/better-auth-elasticsearch";
+
+const { session, verification } = await purgeExpired(auth);
+```
+
+It replaces the `sessionRetentionDays` and `verificationRetentionDays`
+options of 0.1.x, whose lifecycle policies deleted whole indices rather than
+expired rows. Those options are gone; drop them from your config.
 
 ## Development
 

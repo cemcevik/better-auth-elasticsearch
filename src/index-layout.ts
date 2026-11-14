@@ -68,7 +68,6 @@ const isAlreadyExists = (error: unknown) =>
 export interface IndexSettings {
   numberOfShards: number;
   numberOfReplicas: number;
-  lifecyclePolicy?: string | undefined;
 }
 
 /**
@@ -82,19 +81,15 @@ export const ensureAliasedIndex = async (
   client: Client,
   alias: string,
   expected: MappingProperties,
-  settings: () => Promise<IndexSettings>,
+  settings: IndexSettings,
 ): Promise<void> => {
   let live = await liveMappings(client, alias);
 
   if (!live) {
     try {
-      await createVersionedIndex(
-        client,
-        `${alias}_v1`,
-        expected,
-        await settings(),
-        { [alias]: { is_write_index: true } },
-      );
+      await createVersionedIndex(client, `${alias}_v1`, expected, settings, {
+        [alias]: { is_write_index: true },
+      });
       return;
     } catch (error) {
       // Another process created it first; check what it created.
@@ -137,7 +132,7 @@ const createVersionedIndex = async (
   client: Client,
   index: string,
   expected: MappingProperties,
-  { numberOfShards, numberOfReplicas, lifecyclePolicy }: IndexSettings,
+  { numberOfShards, numberOfReplicas }: IndexSettings,
   aliases?: Record<string, { is_write_index: boolean }>,
 ) => {
   await client.indices.create({
@@ -146,7 +141,6 @@ const createVersionedIndex = async (
     settings: {
       number_of_shards: numberOfShards,
       number_of_replicas: numberOfReplicas,
-      ...(lifecyclePolicy ? { lifecycle: { name: lifecyclePolicy } } : {}),
     },
     mappings: expectedMappings(expected),
   });
@@ -196,7 +190,7 @@ export const migrateAliasedIndex = async (
   client: Client,
   alias: string,
   expected: MappingProperties,
-  settings: () => Promise<IndexSettings>,
+  settings: IndexSettings,
 ): Promise<MigratedIndex | undefined> => {
   const live = await liveMappings(client, alias);
   if (!live) return undefined;
@@ -212,7 +206,7 @@ export const migrateAliasedIndex = async (
   if (mappingDiff(expected, properties).changed.length === 0) return undefined;
 
   const to = `${alias}_v${(await highestVersion(client, alias)) + 1}`;
-  await createVersionedIndex(client, to, expected, await settings());
+  await createVersionedIndex(client, to, expected, settings);
 
   try {
     // Once the block is acknowledged no write is still in flight, so the
