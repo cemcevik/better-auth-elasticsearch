@@ -61,7 +61,7 @@ export const migrate = async (
   ] as Migrator | undefined;
   if (!migrator) {
     throw new Error(
-      "migrate() needs a better-auth instance whose database is elasticsearchAdapter() from @cemcevik/better-auth-elasticsearch.",
+      "migrate() needs a better-auth instance whose database is elasticsearchAdapter() from better-auth-elasticsearch.",
     );
   }
   return migrator({

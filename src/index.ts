@@ -1,6 +1,6 @@
 export {
   elasticsearchAdapter,
-  type ElasticAdapterConfig,
+  type ElasticsearchAdapterConfig,
 } from "./elasticsearch-adapter.js";
 export {
   migrate,

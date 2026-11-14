@@ -33,10 +33,21 @@ type SourceDoc = Record<
   Primitive | Primitive[] | Record<string, unknown>
 >;
 
-export interface ElasticAdapterConfig {
+export interface ElasticsearchAdapterConfig {
+  /** A client from `@elastic/elasticsearch` whose major matches the server. */
   client: Client;
+  /** better-auth's adapter debug logging. Off by default. */
   debugLogs?: DBAdapterDebugLogOption;
+  /**
+   * Prepended to every alias and index name, as `<prefix>_<model>`. Lets
+   * several apps or environments share one cluster.
+   */
   indexPrefix?: string;
+  /**
+   * How often a request that failed for a transient reason (a timeout, a
+   * dropped connection, a 429 or 5xx response) is retried, with exponential
+   * backoff (default 3).
+   */
   maxRetries?: number;
   /**
    * When a write becomes searchable. "immediate" (the default) refreshes the
@@ -52,8 +63,10 @@ export interface ElasticAdapterConfig {
    * try again until the move is done; after this long they fail.
    */
   writeBlockTimeoutMs?: number;
-  number_of_shards?: number;
-  number_of_replicas?: number;
+  /** Primary shards of each index the adapter creates (default 1). */
+  numberOfShards?: number;
+  /** Replicas of each index the adapter creates (default 0). */
+  numberOfReplicas?: number;
 }
 
 /**
@@ -96,28 +109,30 @@ const deletedBefore = (error: unknown): number =>
   (error as { meta?: { body?: { deleted?: number } } }).meta?.body?.deleted ??
   0;
 
+/** A row as better-auth expects it: the stored fields, with `id` set. */
 const normalizeHit = (hit: {
   _id?: string;
   _source?: SourceDoc;
 }): SourceDoc => {
   const source = hit._source ?? {};
-  const documentId = hit._id ?? randomUUID();
-  return {
-    ...source,
-    id: (source.id as string | undefined) ?? documentId,
-  };
+  return { ...source, id: source.id ?? hit._id ?? null };
 };
 
+/**
+ * A better-auth database adapter that stores each model in Elasticsearch,
+ * behind an alias over a versioned index with mappings derived from the
+ * better-auth schema. Pass the result as `database` to `betterAuth()`.
+ */
 export const elasticsearchAdapter = (
-  config: ElasticAdapterConfig,
+  config: ElasticsearchAdapterConfig,
 ): ReturnType<typeof createAdapterFactory> => {
   const prefix = config.indexPrefix ?? "";
   const maxRetries = config.maxRetries ?? 3;
   const refresh = config.refresh === "wait_for" ? "wait_for" : true;
   const writeBlockTimeoutMs = config.writeBlockTimeoutMs ?? 30_000;
   const indexSettings = {
-    numberOfShards: config.number_of_shards ?? 1,
-    numberOfReplicas: config.number_of_replicas ?? 0,
+    numberOfShards: config.numberOfShards ?? 1,
+    numberOfReplicas: config.numberOfReplicas ?? 0,
   };
 
   const adapter = createAdapterFactory({

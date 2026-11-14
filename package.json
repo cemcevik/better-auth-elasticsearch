@@ -1,7 +1,25 @@
 {
-  "name": "@cemcevik/better-auth-elasticsearch",
-  "version": "0.1.8",
-  "description": "Elasticsearch adapter for Better Auth",
+  "name": "better-auth-elasticsearch",
+  "version": "0.2.0",
+  "description": "Elasticsearch database adapter for Better Auth",
+  "keywords": [
+    "better-auth",
+    "better-auth-adapter",
+    "elasticsearch",
+    "adapter",
+    "auth",
+    "database"
+  ],
+  "homepage": "https://github.com/cemcevik/better-auth-elasticsearch#readme",
+  "bugs": {
+    "url": "https://github.com/cemcevik/better-auth-elasticsearch/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cemcevik/better-auth-elasticsearch.git"
+  },
+  "license": "Apache-2.0",
+  "author": "cemcevik",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,7 +29,8 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": ["dist", "src"],
+  "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.es8.json --noEmit",
@@ -23,14 +42,6 @@
     "format": "biome format . --write",
     "check": "pnpm lint && pnpm typecheck && pnpm test"
   },
-  "keywords": ["better-auth", "elasticsearch", "adapter", "auth"],
-  "author": "cemcevik",
-  "license": "Apache-2.0",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/cemcevik/better-auth-elasticsearch.git"
-  },
-  "homepage": "https://github.com/cemcevik/better-auth-elasticsearch#readme",
   "engines": {
     "node": ">=22"
   },

@@ -2,7 +2,7 @@ import type { Client } from "@elastic/elasticsearch";
 import type { MappingProperty } from "@elastic/elasticsearch/lib/api/types";
 import type { BetterAuthDBSchema, DBFieldAttribute } from "better-auth/db";
 
-import { statusCodeOf, wait } from "./elasticsearch-client.js";
+import { isNotFound, wait } from "./elasticsearch-client.js";
 
 /**
  * Strings are keywords. 8191 is the longest string, in characters, that is
@@ -59,8 +59,6 @@ export const expectedMappings = (properties: MappingProperties) => ({
 /** The type Elasticsearch reports for a property; objects may omit it. */
 const typeOf = (property: MappingProperty): string => property.type ?? "object";
 
-const isNotFound = (error: unknown) => statusCodeOf(error) === 404;
-
 const isAlreadyExists = (error: unknown) =>
   (error as { meta?: { body?: { error?: { type?: string } } } }).meta?.body
     ?.error?.type === "resource_already_exists_exception";
@@ -111,7 +109,7 @@ export const ensureAliasedIndex = async (
     const [first] = diff.changed;
     if (first) {
       throw new Error(
-        `Field "${first.name}" of Elasticsearch index "${index}" (alias "${alias}") has type "${first.from}", but the better-auth schema needs "${first.to}". Run migrate() from @cemcevik/better-auth-elasticsearch to move the data to an index with the new mapping.`,
+        `Field "${first.name}" of Elasticsearch index "${index}" (alias "${alias}") has type "${first.from}", but the better-auth schema needs "${first.to}". Run migrate() from better-auth-elasticsearch to move the data to an index with the new mapping.`,
       );
     }
     Object.assign(missing, diff.missing);

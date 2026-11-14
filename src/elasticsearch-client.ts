@@ -118,6 +118,7 @@ export const retryOnContention = async <T>(
   );
 };
 
+/** A timeout, dropped connection or overloaded cluster, worth trying again. */
 const isRetriableError = (error: unknown): boolean => {
   if (!(error instanceof Error)) return false;
 
@@ -141,6 +142,11 @@ export const wait = async (milliseconds: number): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
 };
 
+/**
+ * Runs `operation`, retrying up to `maxRetries` times with exponential
+ * backoff while it fails for a transient reason (see `isRetriableError`).
+ * Only for requests that are safe to repeat.
+ */
 export const withElasticsearchRetry = async <T>(
   operation: () => Promise<T>,
   maxRetries = 3,

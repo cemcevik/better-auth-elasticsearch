@@ -14,6 +14,8 @@ on:
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
+  # Run by the release workflow before it publishes.
+  workflow_call:
 
 permissions:
   contents: read
