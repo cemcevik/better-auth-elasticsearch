@@ -10,11 +10,19 @@ import {
 import {
   isNotFound,
   isVersionConflict,
+  isWriteBlocked,
   retryOnContention,
   wait,
+  waitOutWriteBlock,
   withElasticsearchRetry,
+  writeBlockWaiter,
 } from "./elasticsearch-client";
-import { ensureAliasedIndex, expectedProperties } from "./index-layout";
+import {
+  ensureAliasedIndex,
+  expectedProperties,
+  migrateAliasedIndex,
+} from "./index-layout";
+import { MIGRATOR, type MigratedModel, type Migrator } from "./migrate";
 import { whereToQuery } from "./where-to-query";
 
 type Primitive = string | number | boolean | Date | null;
@@ -38,6 +46,12 @@ export interface ElasticAdapterConfig {
    * refreshes immediately, as Elasticsearch cannot make those wait.
    */
   refresh?: "immediate" | "wait_for";
+  /**
+   * How long, in milliseconds, a write waits while migrate() moves its model
+   * to a new index (default 30000). Writes meeting the old index's write block
+   * try again until the move is done; after this long they fail.
+   */
+  writeBlockTimeoutMs?: number;
   number_of_shards?: number;
   number_of_replicas?: number;
 }
@@ -77,6 +91,11 @@ for (entry in params.fields.entrySet()) {
 /** How many rows `updateMany` reads and writes per request. */
 const UPDATE_MANY_PAGE_SIZE = 1000;
 
+/** How many rows a by-query delete removed before Elasticsearch refused it. */
+const deletedBefore = (error: unknown): number =>
+  (error as { meta?: { body?: { deleted?: number } } }).meta?.body?.deleted ??
+  0;
+
 const normalizeHit = (hit: {
   _id?: string;
   _source?: SourceDoc;
@@ -97,6 +116,7 @@ export const elasticsearchAdapter = (
   const verificationRetentionDays = config.verificationRetentionDays ?? 7;
   const maxRetries = config.maxRetries ?? 3;
   const refresh = config.refresh === "wait_for" ? "wait_for" : true;
+  const writeBlockTimeoutMs = config.writeBlockTimeoutMs ?? 30_000;
   const numberOfShards = config.number_of_shards ?? 1;
   const numberOfReplicas = config.number_of_replicas ?? 0;
 
@@ -118,6 +138,9 @@ export const elasticsearchAdapter = (
 
       const withRetry = <T>(operation: () => Promise<T>) =>
         withElasticsearchRetry(operation, maxRetries);
+
+      const whileMigrating = <T>(operation: () => Promise<T>) =>
+        waitOutWriteBlock(writeBlockTimeoutMs, operation);
 
       // Elasticsearch index and alias names must be lowercase.
       const indexForModel = (model: string) =>
@@ -159,6 +182,12 @@ export const elasticsearchAdapter = (
         }
       };
 
+      const indexSettings = (model: string) => async () => ({
+        numberOfShards,
+        numberOfReplicas,
+        lifecyclePolicy: await putLifecyclePolicyIfNeeded(model),
+      });
+
       // One first-use check per model and process. A failed check is
       // forgotten so the next call tries again.
       const ready = new Map<string, Promise<void>>();
@@ -177,11 +206,7 @@ export const elasticsearchAdapter = (
               client,
               alias,
               expectedProperties(schema, getDefaultModelName(model)),
-              async () => ({
-                numberOfShards,
-                numberOfReplicas,
-                lifecyclePolicy: await putLifecyclePolicyIfNeeded(model),
-              }),
+              indexSettings(model),
             ),
           );
           ready.set(alias, check);
@@ -189,6 +214,22 @@ export const elasticsearchAdapter = (
         }
         await check;
         return alias;
+      };
+
+      // One model at a time, so a failure leaves the rest untouched.
+      const migrator: Migrator = async ({ deleteOldIndices }) => {
+        const migrated: MigratedModel[] = [];
+        for (const [model, table] of Object.entries(schema)) {
+          const result = await migrateAliasedIndex(
+            client,
+            indexForModel(table.modelName),
+            expectedProperties(schema, model),
+            indexSettings(model),
+            { deleteOldIndex: deleteOldIndices },
+          );
+          if (result) migrated.push({ model, ...result });
+        }
+        return { migrated };
       };
 
       // The factory passes `select` with schema field names; the document
@@ -227,6 +268,12 @@ export const elasticsearchAdapter = (
       /**
        * The first row matching `query`, with the sequence number and primary
        * term a conditional write needs to fail if the row changed since.
+       *
+       * `ifUnchanged` also names the concrete index the row was read from,
+       * overriding the alias. Those numbers only mean something there: once
+       * migrate() swaps the alias, the copy in the new index has numbers of
+       * its own, which a stale pair could match by chance. Aimed at the old
+       * index, the write meets its write block instead and reads again.
        */
       const findVersioned = async (index: string, query: object) => {
         const result = await withRetry(() =>
@@ -249,6 +296,7 @@ export const elasticsearchAdapter = (
           id: hit._id,
           source: hit._source ?? {},
           ifUnchanged: {
+            index: hit._index,
             if_seq_no: hit._seq_no,
             if_primary_term: hit._primary_term,
           },
@@ -256,6 +304,7 @@ export const elasticsearchAdapter = (
       };
 
       return {
+        options: { [MIGRATOR]: migrator },
         // Deletes the row only if it is unchanged since the search found it.
         // A lost race searches again, since the row may have been updated
         // rather than consumed; a row another caller deleted yields null.
@@ -269,33 +318,37 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
-          return retryOnContention<T | null>(
-            `consumeOne on "${model}"`,
-            MAX_ATOMIC_ATTEMPTS,
-            async (retry) => {
-              const row = await findVersioned(index, query);
-              if (!row) return null;
-              try {
-                await client.delete({
-                  index,
-                  id: row.id,
-                  ...row.ifUnchanged,
-                  refresh,
-                });
-                return normalizeHit({ _id: row.id, _source: row.source }) as T;
-              } catch (error) {
-                if (!isVersionConflict(error) && !isNotFound(error))
-                  throw error;
-              }
-              // Searches lag behind writes; a realtime check tells whether
-              // another caller deleted the row or only changed it.
-              const stillThere = await withRetry(() =>
-                client.exists({ index, id: row.id }),
-              );
-              if (!stillThere) return null;
-              await afterLostRace(index);
-              return retry;
-            },
+          return whileMigrating(() =>
+            retryOnContention<T | null>(
+              `consumeOne on "${model}"`,
+              MAX_ATOMIC_ATTEMPTS,
+              async (retry) => {
+                const row = await findVersioned(index, query);
+                if (!row) return null;
+                try {
+                  await client.delete({
+                    id: row.id,
+                    ...row.ifUnchanged,
+                    refresh,
+                  });
+                  return normalizeHit({
+                    _id: row.id,
+                    _source: row.source,
+                  }) as T;
+                } catch (error) {
+                  if (!isVersionConflict(error) && !isNotFound(error))
+                    throw error;
+                }
+                // Searches lag behind writes; a realtime check tells whether
+                // another caller deleted the row or only changed it.
+                const stillThere = await withRetry(() =>
+                  client.exists({ index, id: row.id }),
+                );
+                if (!stillThere) return null;
+                await afterLostRace(index);
+                return retry;
+              },
+            ),
           );
         },
         // The search applies the where guard; the scripted update applies only
@@ -316,16 +369,19 @@ export const elasticsearchAdapter = (
           const query = queryFor(model, where);
           const params = { increment, set: set ?? {} };
 
-          return retryOnContention<T | null>(
-            `incrementOne on "${model}"`,
-            MAX_ATOMIC_ATTEMPTS,
-            async (retry) => {
-              const row = await findVersioned(index, query);
-              if (!row) return null;
-              try {
-                const result = await client.update<SourceDoc, never, SourceDoc>(
-                  {
-                    index,
+          return whileMigrating(() =>
+            retryOnContention<T | null>(
+              `incrementOne on "${model}"`,
+              MAX_ATOMIC_ATTEMPTS,
+              async (retry) => {
+                const row = await findVersioned(index, query);
+                if (!row) return null;
+                try {
+                  const result = await client.update<
+                    SourceDoc,
+                    never,
+                    SourceDoc
+                  >({
                     id: row.id,
                     ...row.ifUnchanged,
                     refresh,
@@ -335,21 +391,21 @@ export const elasticsearchAdapter = (
                       params,
                     },
                     _source: true,
-                  },
-                );
-                return normalizeHit({
-                  _id: row.id,
-                  _source: result.get?._source,
-                }) as T;
-              } catch (error) {
-                // A conflict means the row changed; a missing row was deleted
-                // and the next search will not find it.
-                if (!isVersionConflict(error) && !isNotFound(error))
-                  throw error;
-                await afterLostRace(index);
-                return retry;
-              }
-            },
+                  });
+                  return normalizeHit({
+                    _id: row.id,
+                    _source: result.get?._source,
+                  }) as T;
+                } catch (error) {
+                  // A conflict means the row changed; a missing row was deleted
+                  // and the next search will not find it.
+                  if (!isVersionConflict(error) && !isNotFound(error))
+                    throw error;
+                  await afterLostRace(index);
+                  return retry;
+                }
+              },
+            ),
           );
         },
         create: async <T extends Record<string, unknown>>({
@@ -372,14 +428,16 @@ export const elasticsearchAdapter = (
           };
 
           try {
-            await withRetry(() =>
-              client.index({
-                index,
-                id,
-                op_type: "create",
-                refresh,
-                document: source,
-              }),
+            await whileMigrating(() =>
+              withRetry(() =>
+                client.index({
+                  index,
+                  id,
+                  op_type: "create",
+                  refresh,
+                  document: source,
+                }),
+              ),
             );
           } catch (error) {
             if (isVersionConflict(error)) {
@@ -491,26 +549,28 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
-          const row = await findVersioned(index, query);
-          if (!row) return null;
+          // Conditional on the row read, so a blocked write reads again.
+          return whileMigrating(async () => {
+            const row = await findVersioned(index, query);
+            if (!row) return null;
 
-          const mergedDocument: SourceDoc = {
-            ...row.source,
-            ...(update as SourceDoc),
-            id: (row.source.id as string | undefined) ?? row.id,
-          };
+            const mergedDocument: SourceDoc = {
+              ...row.source,
+              ...(update as SourceDoc),
+              id: (row.source.id as string | undefined) ?? row.id,
+            };
 
-          await withRetry(() =>
-            client.index({
-              index,
-              id: row.id,
-              document: mergedDocument,
-              ...row.ifUnchanged,
-              refresh,
-            }),
-          );
+            await withRetry(() =>
+              client.index({
+                id: row.id,
+                document: mergedDocument,
+                ...row.ifUnchanged,
+                refresh,
+              }),
+            );
 
-          return mergedDocument as T;
+            return mergedDocument as T;
+          });
         },
         updateMany: async ({
           model,
@@ -536,15 +596,21 @@ export const elasticsearchAdapter = (
           // is updated only if unchanged since the search found it, and only
           // the rows that lost that race are searched for again, so every
           // row is updated and counted once. A row whose write Elasticsearch
-          // rejected under load was not written and goes again the same way.
+          // rejected under load, or refused while migrate() moves the index,
+          // was not written and goes again the same way.
           let updated = 0;
           let retryIds: string[] | undefined;
-          for (let pass = 0; pass < MAX_MANY_PASSES; pass++) {
+          // Passes that waited out a write block do not count towards
+          // MAX_MANY_PASSES; the write block timeout bounds them instead.
+          const pauseWhileBlocked = writeBlockWaiter(writeBlockTimeoutMs);
+          let pass = 0;
+          while (pass < MAX_MANY_PASSES) {
             const passQuery = retryIds
               ? { bool: { filter: [query, { ids: { values: retryIds } }] } }
               : query;
             const unwrittenIds: string[] = [];
             let rejected = false;
+            let blocked = false;
 
             // Paging by id needs no point in time: ids are unique and never
             // change, so no row is read twice, and a row that changes on a
@@ -567,13 +633,15 @@ export const elasticsearchAdapter = (
               if (hits.length === 0) break;
               searchAfter = hits[hits.length - 1]?.sort;
 
-              // Not retried, like the other conditional writes.
+              // Not retried, like the other conditional writes. Each row is
+              // written to the index it was read from, as in `findVersioned`.
               const result = await client.bulk({
                 index,
                 refresh,
                 operations: hits.flatMap((hit) => [
                   {
                     update: {
+                      _index: hit._index,
                       _id: hit._id,
                       if_seq_no: hit._seq_no,
                       if_primary_term: hit._primary_term,
@@ -584,7 +652,10 @@ export const elasticsearchAdapter = (
               });
               for (const item of result.items) {
                 const outcome = item.update;
-                if (
+                if (isWriteBlocked(outcome) && outcome?._id) {
+                  unwrittenIds.push(outcome._id);
+                  blocked = true;
+                } else if (
                   (outcome?.status === 409 || outcome?.status === 429) &&
                   outcome._id
                 ) {
@@ -609,8 +680,17 @@ export const elasticsearchAdapter = (
             // whether those rows still match and what to condition on. Even
             // with "immediate" refresh a winner may not have refreshed yet.
             await withRetry(() => client.indices.refresh({ index }));
+            if (blocked) {
+              await pauseWhileBlocked(
+                new Error(
+                  `updateMany on "${model}" updated ${updated} rows, but the index stayed write-blocked by a migration for longer than ${writeBlockTimeoutMs} ms`,
+                ),
+              );
+              continue;
+            }
             // Give an overloaded cluster a growing, jittered while to drain.
             if (rejected) await wait((0.5 + Math.random()) * 50 * 2 ** pass);
+            pass++;
           }
           throw new Error(
             `updateMany on "${model}" updated ${updated} rows, but the remaining matching rows could not be written in ${MAX_MANY_PASSES} passes: other requests kept changing them or Elasticsearch kept rejecting the writes`,
@@ -628,21 +708,23 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
-          const searchResult = await withRetry(() =>
-            client.search<SourceDoc>({ index, query, size: 1 }),
-          );
+          await whileMigrating(async () => {
+            const searchResult = await withRetry(() =>
+              client.search<SourceDoc>({ index, query, size: 1 }),
+            );
 
-          const hit = searchResult.hits.hits[0];
-          const hitId = hit?._id;
-          if (!hit || !hitId) return;
+            const hit = searchResult.hits.hits[0];
+            const hitId = hit?._id;
+            if (!hit || !hitId) return;
 
-          await withRetry(() =>
-            client.delete({
-              index,
-              id: hitId,
-              refresh,
-            }),
-          );
+            await withRetry(() =>
+              client.delete({
+                index,
+                id: hitId,
+                refresh,
+              }),
+            );
+          });
         },
         deleteMany: async ({
           model,
@@ -656,19 +738,32 @@ export const elasticsearchAdapter = (
 
           // A row that changes mid-pass is skipped as a version conflict, so
           // rerun until a pass meets none. Rows already deleted no longer
-          // match, so a rerun never counts a row twice.
+          // match, so a rerun never counts a row twice. A pass refused by a
+          // migration's write block reruns too, without counting as a pass.
           let deleted = 0;
-          for (let pass = 0; pass < MAX_MANY_PASSES; pass++) {
-            const result = await withRetry(() =>
-              client.deleteByQuery({
-                index,
-                query,
-                conflicts: "proceed",
-                refresh: true,
-              }),
-            );
+          const pauseWhileBlocked = writeBlockWaiter(writeBlockTimeoutMs);
+          let pass = 0;
+          while (pass < MAX_MANY_PASSES) {
+            let result: estypes.DeleteByQueryResponse;
+            try {
+              result = await withRetry(() =>
+                client.deleteByQuery({
+                  index,
+                  query,
+                  conflicts: "proceed",
+                  refresh: true,
+                }),
+              );
+            } catch (error) {
+              if (!isWriteBlocked(error)) throw error;
+              // Rows deleted before the block are gone and not copied over.
+              deleted += deletedBefore(error);
+              await pauseWhileBlocked(error);
+              continue;
+            }
             deleted += result.deleted ?? 0;
             if (!result.version_conflicts) return deleted;
+            pass++;
           }
           throw new Error(
             `deleteMany on "${model}" deleted ${deleted} rows, but other requests kept changing matching rows; some may remain after ${MAX_MANY_PASSES} passes`,

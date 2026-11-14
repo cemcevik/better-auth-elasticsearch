@@ -22,6 +22,75 @@ export const isNotFound = (error: unknown): boolean =>
   statusCodeOf(error) === 404;
 
 /**
+ * A write refused because its index has a write block, which migrate() sets
+ * on the old index while it copies the rows. Also matches a bulk item's
+ * `{ status, error }`, and a by-query write whose every failure is the block.
+ */
+export const isWriteBlocked = (errorOrItem: unknown): boolean => {
+  const withBody = errorOrItem as {
+    status?: number;
+    error?: { type?: string; reason?: string };
+    meta?: {
+      body?: {
+        error?: { type?: string; reason?: string };
+        failures?: { status?: number; cause?: object }[];
+      };
+    };
+  };
+  const failures = withBody?.meta?.body?.failures;
+  if (failures && failures.length > 0) {
+    return failures.every((failure) =>
+      isWriteBlocked({ status: failure.status, error: failure.cause }),
+    );
+  }
+  const status = withBody?.status ?? statusCodeOf(errorOrItem);
+  const error = withBody?.error ?? withBody?.meta?.body?.error;
+  return (
+    status === 403 &&
+    error?.type === "cluster_block_exception" &&
+    (error.reason ?? "").includes("index write")
+  );
+};
+
+/**
+ * A wait of at most `timeoutMs` from the first pause, spread over many short
+ * pauses. Each call pauses once, a little longer each time; once the time is
+ * used up it throws `error` instead.
+ */
+export const writeBlockWaiter = (timeoutMs: number) => {
+  let deadline: number | undefined;
+  let pauses = 0;
+  return async (error: unknown): Promise<void> => {
+    deadline ??= Date.now() + timeoutMs;
+    const left = deadline - Date.now();
+    if (left <= 0) throw error;
+    const pause = Math.min(500, 25 * 2 ** pauses++) * (0.5 + Math.random());
+    await wait(Math.min(left, pause));
+  };
+};
+
+/**
+ * Runs `operation` again while its write meets a migration's write block,
+ * for at most `timeoutMs`. The whole operation reruns, so a write that is
+ * conditional on what it read reads again from the index the alias points
+ * at by then.
+ */
+export const waitOutWriteBlock = async <T>(
+  timeoutMs: number,
+  operation: () => Promise<T>,
+): Promise<T> => {
+  const pause = writeBlockWaiter(timeoutMs);
+  while (true) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isWriteBlocked(error)) throw error;
+      await pause(error);
+    }
+  }
+};
+
+/**
  * Runs `attempt` until it returns something other than `retry`, waiting a
  * short, jittered while between tries so contenders spread out. Throws once
  * `maxAttempts` tries all asked to retry.
