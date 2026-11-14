@@ -50,9 +50,9 @@ import { purgeExpired } from "@cemcevik/better-auth-elasticsearch";
 const { session, verification } = await purgeExpired(auth);
 ```
 
-It replaces the `sessionRetentionDays` and `verificationRetentionDays`
-options of 0.1.x, whose lifecycle policies deleted whole indices rather than
-expired rows. Those options are gone; drop them from your config.
+Purging is a write: while `migrate()` moves the session or verification
+index, it waits like any other write and fails after `writeBlockTimeoutMs`.
+The next scheduled run picks up what it missed.
 
 ## Development
 
