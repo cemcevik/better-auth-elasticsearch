@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.2
+
+### Fixed
+
+- `update` no longer fails with a version conflict when another request
+  changes the same row at the same time, as parallel requests refreshing one
+  session do. It reads the row again and applies the update to it.
+- `create` and `update` no longer report a failure when a write succeeded but
+  its response was lost and the retry met the row it had just written.
+  `create` reported that as a "duplicate key" error.
+- `delete` no longer fails when the row is already gone by the time its
+  write arrives: deleted by another request, or by its own earlier attempt
+  whose response was lost.
+- `findMany` returns rows in a fixed order, by `id` when no sort is given and
+  by `id` among rows the sort ranks equal, so pages fetched with `offset` no
+  longer repeat or skip rows.
+
+### Changed
+
+- The README says to set `numberOfReplicas` on clusters with several nodes,
+  and that `findMany` cannot page past 10,000 rows.
+
 ## 0.3.1
 
 ### Changed
