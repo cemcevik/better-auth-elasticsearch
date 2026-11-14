@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import type { Client, estypes } from "@elastic/elasticsearch";
 import {
@@ -309,9 +310,44 @@ export const elasticsearchAdapter = (
         }
       };
 
-      // Conditional writes below are not passed through `withRetry`: a write
-      // that timed out may still have landed, and a retry would then see its
-      // own write as a lost race and apply it twice.
+      // The conditional writes of `consumeOne` and `incrementOne` are not
+      // passed through `withRetry`: a write that timed out may still have
+      // landed, and a retry would then see its own write as a lost race and
+      // apply it twice. `create` and `update` write a whole row, so they
+      // retry with `writeRow`, which can tell by the stored row.
+
+      /**
+       * Sends `write`, which stores `document` as row `id` unless the row
+       * exists (create) or changed since it was read (update), retrying
+       * transient failures. A retry that meets a version conflict may have
+       * lost to an earlier attempt whose response never arrived; the write
+       * counts as done if the row is stored exactly as `document`.
+       */
+      const writeRow = async (
+        index: string,
+        id: string,
+        document: SourceDoc,
+        write: () => Promise<unknown>,
+      ) => {
+        let attempts = 0;
+        try {
+          await withRetry(() => {
+            attempts++;
+            return write();
+          });
+        } catch (error) {
+          if (attempts === 1 || !isVersionConflict(error)) throw error;
+          const stored = await withRetry(() =>
+            client.get<SourceDoc>({ index, id }),
+          ).catch((getError) => {
+            if (isNotFound(getError)) return undefined;
+            throw getError;
+          });
+          // Compared as the JSON that was sent, which is what is stored.
+          const sent = JSON.parse(JSON.stringify(document));
+          if (!isDeepStrictEqual(stored?._source, sent)) throw error;
+        }
+      };
 
       /**
        * The first row matching `query`, with the sequence number and primary
@@ -622,7 +658,7 @@ export const elasticsearchAdapter = (
           };
 
           const write = () =>
-            withRetry(() =>
+            writeRow(index, id, source, () =>
               client.index({
                 index,
                 id,
@@ -722,6 +758,24 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
+          // Always ordered, by `id` last, so that pages fetched with `offset`
+          // neither repeat nor skip rows.
+          const sortField =
+            sortBy && getFieldName({ model, field: sortBy.field });
+          const sort: estypes.SortCombinations[] = [
+            ...(sortBy && sortField && sortField !== "id"
+              ? [
+                  {
+                    [sortField]: {
+                      order: sortBy.direction,
+                      unmapped_type: "keyword",
+                    },
+                  },
+                ]
+              : []),
+            { id: sortField === "id" && sortBy ? sortBy.direction : "asc" },
+          ];
+
           const result = await withRetry(() =>
             client.search<SourceDoc>({
               index,
@@ -729,18 +783,7 @@ export const elasticsearchAdapter = (
               size: limit,
               ...(offset !== undefined ? { from: offset } : {}),
               ...sourceFor(model, select),
-              ...(sortBy
-                ? {
-                    sort: [
-                      {
-                        [getFieldName({ model, field: sortBy.field })]: {
-                          order: sortBy.direction,
-                          unmapped_type: "keyword",
-                        },
-                      },
-                    ],
-                  }
-                : {}),
+              sort,
             }),
           );
 
@@ -779,42 +822,56 @@ export const elasticsearchAdapter = (
           // claims an earlier run created.
           const claims = reservations.claims(model, index);
 
-          // Conditional on the row read, so a blocked write reads again.
-          return whileMigrating(index, async () => {
-            const row = await findVersioned(index, query);
-            if (!row) return null;
+          // Conditional on the row read, so a blocked write reads again, and
+          // so does one that lost a race: the update then goes onto the row
+          // as the other request left it, if it still matches `where`.
+          return whileMigrating(index, () =>
+            retryOnContention<T | null>(
+              `update on "${model}"`,
+              MAX_ATOMIC_ATTEMPTS,
+              async (retry) => {
+                const row = await findVersioned(index, query);
+                if (!row) return null;
 
-            const mergedDocument: SourceDoc = {
-              ...row.source,
-              ...(update as SourceDoc),
-              id: (row.source.id as string | undefined) ?? row.id,
-            };
+                const mergedDocument: SourceDoc = {
+                  ...row.source,
+                  ...(update as SourceDoc),
+                  id: (row.source.id as string | undefined) ?? row.id,
+                };
 
-            const change = reservations.changeOf(
-              model,
-              row.id,
-              row.source,
-              update as SourceDoc,
-            );
-            if (change) await claims.claim([change]);
+                const change = reservations.changeOf(
+                  model,
+                  row.id,
+                  row.source,
+                  update as SourceDoc,
+                );
+                if (change) await claims.claim([change]);
 
-            try {
-              await withRetry(() =>
-                client.index({
-                  id: row.id,
-                  document: mergedDocument,
-                  ...row.ifUnchanged,
-                  refresh,
-                }),
-              );
-            } catch (error) {
-              if (change) await claims.failed(row.id, error);
-              throw error;
-            }
-            if (change) await claims.written([row.id]);
+                try {
+                  await writeRow(
+                    row.ifUnchanged.index,
+                    row.id,
+                    mergedDocument,
+                    () =>
+                      client.index({
+                        id: row.id,
+                        document: mergedDocument,
+                        ...row.ifUnchanged,
+                        refresh,
+                      }),
+                  );
+                } catch (error) {
+                  if (change) await claims.failed(row.id, error);
+                  if (!isVersionConflict(error)) throw error;
+                  await afterLostRace(index);
+                  return retry;
+                }
+                if (change) await claims.written([row.id]);
 
-            return mergedDocument as T;
-          });
+                return mergedDocument as T;
+              },
+            ),
+          );
         },
         updateMany: async ({
           model,
@@ -911,13 +968,17 @@ export const elasticsearchAdapter = (
             const hitId = hit?._id;
             if (!hit || !hitId) return undefined;
 
+            // A row already gone was deleted by another request, or by an
+            // earlier attempt of this one whose response never arrived.
             await withRetry(() =>
               client.delete({
                 index,
                 id: hitId,
                 refresh,
               }),
-            );
+            ).catch((error) => {
+              if (!isNotFound(error)) throw error;
+            });
             return { id: hitId, source: hit._source };
           });
           if (deleted) await reservations.release(model, index, [deleted]);

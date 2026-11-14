@@ -51,7 +51,7 @@ Indices are created on first use.
 | `writeBlockTimeoutMs` | `30000`       | How long writes wait during a migration before failing.           |
 | `maxRetries`          | `3`           | Retries for transient errors (timeouts, 429, 5xx).                |
 | `numberOfShards`      | `1`           | Primary shards per index.                                         |
-| `numberOfReplicas`    | `0`           | Replicas per index.                                               |
+| `numberOfReplicas`    | `0`           | Replicas per index. See [Replicas](#replicas).                    |
 | `debugLogs`           | `false`       | Better Auth adapter debug logging.                                |
 | `skipUniqueFor`       | `["session.token"]` | Unique fields left unenforced, as `"model.field"`. Replaces the default. |
 
@@ -61,6 +61,13 @@ With the default `"immediate"`, every write is searchable as soon as it
 returns, which is what Better Auth expects. `"wait_for"` waits for the next
 scheduled refresh instead: slower writes, less cluster load. `deleteMany`
 always refreshes immediately.
+
+### Replicas
+
+The default of `0` keeps one copy of each index, which suits a single-node
+cluster. On a cluster with several nodes, set `numberOfReplicas` to at least
+`1`: without a replica, losing a node loses the auth data stored on it. The
+setting applies when an index is created.
 
 ## Example
 
@@ -146,6 +153,9 @@ const { session, verification } = await purgeExpired(auth);
   minutes. Fields listed in `skipUniqueFor` are not enforced; name a
   compound index as `"model.fieldA+fieldB"`. Run `migrate()` once to reserve rows
   written by an earlier version.
+- **Lists stop at 10,000 rows.** `findMany` returns rows in a fixed order, by
+  `id` unless a sort is given, but Elasticsearch refuses a page that ends
+  past its `index.max_result_window`, 10,000 rows by default.
 - **Joins work**, through Better Auth's follow-up queries, since Elasticsearch
   has no joins of its own.
 

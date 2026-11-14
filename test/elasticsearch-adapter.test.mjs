@@ -217,18 +217,13 @@ const withConcurrentSessionUpdates = async (adapter, rows, whileRunning) => {
   const updater = async () => {
     while (running) {
       const row = rows[Math.floor(Math.random() * rows.length)];
-      // A row changed or deleted between the update's search and its write
-      // makes the update fail with a version conflict; that is the race
-      // under test. Any other error fails the test.
-      await adapter
-        .update({
-          model: "session",
-          where: [{ field: "id", value: row.id }],
-          update: { ipAddress: `10.0.0.${Math.floor(Math.random() * 255)}` },
-        })
-        .catch((error) => {
-          if (error?.meta?.statusCode !== 409) throw error;
-        });
+      // An update that loses a race reads the row again, and resolves to
+      // null once the row is deleted; any error fails the test.
+      await adapter.update({
+        model: "session",
+        where: [{ field: "id", value: row.id }],
+        update: { ipAddress: `10.0.0.${Math.floor(Math.random() * 255)}` },
+      });
     }
   };
   const updaters = Array.from({ length: 8 }, updater);
@@ -249,9 +244,28 @@ const withConcurrentSessionUpdates = async (adapter, rows, whileRunning) => {
  */
 const rejectedWrites = { next: 0 };
 
+/**
+ * Lets a test lose the response of a write that landed, as a timeout does.
+ * While `lostResponses.next` is above zero, the next single-row write or delete in a
+ * model's index is sent and then fails with a timeout error.
+ */
+const lostResponses = { next: 0 };
+
 const withRejectedWrites = (client) =>
   new Proxy(client, {
     get(target, property) {
+      if (property === "index" || property === "delete") {
+        return async (params) => {
+          const result = await target[property](params);
+          if (lostResponses.next === 0 || params.index.includes("_unique")) {
+            return result;
+          }
+          lostResponses.next--;
+          const timeout = new Error("Request timed out");
+          timeout.name = "TimeoutError";
+          throw timeout;
+        };
+      }
       if (property === "bulk") {
         return async (params) => {
           if (rejectedWrites.next === 0) return target.bulk(params);
@@ -460,6 +474,98 @@ const concurrencyTestSuite = createTestSuite(
             expect(after?.count).toBe(0);
           },
         },
+      // Parallel requests refreshing one session.
+      "update applies every one of many simultaneous updates to one row":
+        async () => {
+          const [row] = await createSessions(crypto.randomUUID(), 1);
+          const where = [{ field: "id", value: row.id }];
+
+          const results = await concurrently(20, (index) =>
+            adapter.update({
+              model: "session",
+              where,
+              update:
+                index % 2 === 0
+                  ? { ipAddress: "10.0.0.1" }
+                  : { userAgent: "refreshed" },
+            }),
+          );
+
+          expect(results.filter((result) => result === null)).toEqual([]);
+          const after = await adapter.findOne({ model: "session", where });
+          expect(after?.ipAddress).toBe("10.0.0.1");
+          expect(after?.userAgent).toBe("refreshed");
+        },
+      "create succeeds when its write landed but the response was lost":
+        async () => {
+          const session = await generate("session");
+
+          lostResponses.next = 1;
+          const created = await adapter.create({
+            model: "session",
+            data: session,
+            forceAllowId: true,
+          });
+
+          expect(lostResponses.next).toBe(0);
+          expect(
+            await adapter.findOne({
+              model: "session",
+              where: [{ field: "id", value: session.id }],
+            }),
+          ).toEqual(created);
+        },
+      "update succeeds when its write landed but the response was lost":
+        async () => {
+          const [row] = await createSessions(crypto.randomUUID(), 1);
+          const where = [{ field: "id", value: row.id }];
+
+          lostResponses.next = 1;
+          const updated = await adapter.update({
+            model: "session",
+            where,
+            update: { userAgent: "refreshed" },
+          });
+
+          expect(lostResponses.next).toBe(0);
+          expect(updated?.userAgent).toBe("refreshed");
+          expect(await adapter.findOne({ model: "session", where })).toEqual(
+            updated,
+          );
+        },
+      "delete succeeds when its write landed but the response was lost":
+        async () => {
+          const [row] = await createSessions(crypto.randomUUID(), 1);
+          const where = [{ field: "id", value: row.id }];
+
+          lostResponses.next = 1;
+          await adapter.delete({ model: "session", where });
+
+          expect(lostResponses.next).toBe(0);
+          expect(await adapter.findOne({ model: "session", where })).toBeNull();
+        },
+      "findMany without sortBy pages through every row once, ordered by id":
+        async () => {
+          const userId = crypto.randomUUID();
+          const rows = await createSessions(userId, 7);
+          const where = [{ field: "userId", value: userId }];
+
+          const paged = [];
+          for (const offset of [0, 3, 6]) {
+            paged.push(
+              ...(await adapter.findMany({
+                model: "session",
+                where,
+                limit: 3,
+                offset,
+              })),
+            );
+          }
+
+          expect(paged.map((row) => row.id)).toEqual(
+            rows.map((row) => row.id).sort(),
+          );
+        },
       "updateMany writes a row again after Elasticsearch rejected its write":
         async () => {
           const userId = crypto.randomUUID();
@@ -597,6 +703,8 @@ describe("elasticsearchAdapter", async () => {
         disableTests: {
           "deleteMany leaves no matching row when the rows change under it": true,
           "updateMany updates every matching row when the rows change under it": true,
+          // Ordering does not depend on the refresh setting.
+          "findMany without sortBy pages through every row once, ordered by id": true,
         },
       }),
     ],
