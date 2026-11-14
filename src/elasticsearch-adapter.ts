@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { Client } from "@elastic/elasticsearch";
+import type { Client, estypes } from "@elastic/elasticsearch";
 import {
   type CleanedWhere,
   type DBAdapterDebugLogOption,
@@ -33,8 +33,8 @@ export interface ElasticAdapterConfig {
    * When a write becomes searchable. "immediate" (the default) refreshes the
    * index on every write, so the next request finds the row. "wait_for" waits
    * for Elasticsearch's next scheduled refresh instead: slower writes, less
-   * load on the cluster. By-query writes (`updateMany`, `deleteMany`) always
-   * refresh immediately, as Elasticsearch cannot make them wait.
+   * load on the cluster. `deleteMany` is a by-query write and always
+   * refreshes immediately, as Elasticsearch cannot make those wait.
    */
   refresh?: "immediate" | "wait_for";
   number_of_shards?: number;
@@ -49,10 +49,11 @@ export interface ElasticAdapterConfig {
 const MAX_ATOMIC_ATTEMPTS = 50;
 
 /**
- * How often `deleteMany` reruns while rows change under it. Each pass deletes
- * every row that did not change mid-pass, and deleted rows no longer match.
+ * How often `updateMany` and `deleteMany` go again while rows change under
+ * them. Each pass writes every row that did not change mid-pass, so the next
+ * one only has the few rows that did left to write.
  */
-const MAX_DELETE_MANY_PASSES = 5;
+const MAX_MANY_PASSES = 5;
 
 // Applies `params.increment` as deltas (a missing counter counts as 0), then
 // assigns `params.set`.
@@ -64,6 +65,19 @@ for (entry in params.increment.entrySet()) {
 for (entry in params.set.entrySet()) {
   ctx._source[entry.getKey()] = entry.getValue();
 }`;
+
+// Assigns `params.fields`, replacing each value whole. A partial-document
+// update would merge JSON values into the stored ones instead.
+const SET_FIELDS_SCRIPT = `
+for (entry in params.fields.entrySet()) {
+  ctx._source[entry.getKey()] = entry.getValue();
+}`;
+
+/** How many rows `updateMany` reads and writes per request. */
+const UPDATE_MANY_PAGE_SIZE = 1000;
+
+/** How long Elasticsearch keeps `updateMany`'s search view between pages. */
+const UPDATE_MANY_KEEP_ALIVE = "1m";
 
 const normalizeHit = (hit: {
   _id?: string;
@@ -512,26 +526,102 @@ export const elasticsearchAdapter = (
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
-          const params = {
-            fields: update,
+          const script = {
+            lang: "painless",
+            source: SET_FIELDS_SCRIPT,
+            params: { fields: update },
           };
 
-          const result = await withRetry(() =>
-            client.updateByQuery({
-              index,
-              query,
-              conflicts: "proceed",
-              refresh: true,
-              script: {
-                lang: "painless",
-                source:
-                  "for (entry in params.fields.entrySet()) { ctx._source[entry.getKey()] = entry.getValue(); }",
-                params,
-              },
-            }),
-          );
+          // Not an update-by-query: it skips rows that change under it, and
+          // since updated rows usually still match, a rerun cannot tell the
+          // skipped rows from the ones it already updated. Instead each row
+          // is updated only if unchanged since the search found it, and only
+          // the rows that lost that race are searched for again, so every
+          // row is updated and counted once.
+          let updated = 0;
+          let retryIds: string[] | undefined;
+          for (let pass = 0; pass < MAX_MANY_PASSES; pass++) {
+            const passQuery = retryIds
+              ? { bool: { filter: [query, { ids: { values: retryIds } }] } }
+              : query;
+            const conflictedIds: string[] = [];
 
-          return result.updated ?? 0;
+            // The point in time keeps paging stable while rows change.
+            const pointInTime = await withRetry(() =>
+              client.openPointInTime({
+                index,
+                keep_alive: UPDATE_MANY_KEEP_ALIVE,
+              }),
+            );
+            try {
+              let searchAfter: estypes.SortResults | undefined;
+              while (true) {
+                const page = await withRetry(() =>
+                  client.search({
+                    pit: {
+                      id: pointInTime.id,
+                      keep_alive: UPDATE_MANY_KEEP_ALIVE,
+                    },
+                    query: passQuery,
+                    size: UPDATE_MANY_PAGE_SIZE,
+                    sort: ["_shard_doc"],
+                    search_after: searchAfter,
+                    _source: false,
+                    seq_no_primary_term: true,
+                    track_total_hits: false,
+                  }),
+                );
+                const hits = page.hits.hits;
+                if (hits.length === 0) break;
+                searchAfter = hits[hits.length - 1]?.sort;
+
+                // Not retried, like the other conditional writes.
+                const result = await client.bulk({
+                  index,
+                  refresh,
+                  operations: hits.flatMap((hit) => [
+                    {
+                      update: {
+                        _id: hit._id,
+                        if_seq_no: hit._seq_no,
+                        if_primary_term: hit._primary_term,
+                      },
+                    },
+                    { script },
+                  ]),
+                });
+                for (const item of result.items) {
+                  const outcome = item.update;
+                  if (outcome?.status === 409 && outcome._id) {
+                    conflictedIds.push(outcome._id);
+                  } else if (outcome?.status === 404) {
+                    // Another request deleted the row.
+                  } else if (!outcome || outcome.error) {
+                    throw new Error(
+                      `updateMany on "${model}" failed after updating ${updated} rows: ${outcome?.error?.reason ?? outcome?.error?.type ?? "unexpected bulk response"}`,
+                    );
+                  } else {
+                    updated++;
+                  }
+                }
+                if (hits.length < UPDATE_MANY_PAGE_SIZE) break;
+              }
+            } finally {
+              await client
+                .closePointInTime({ id: pointInTime.id })
+                .catch(() => {});
+            }
+
+            if (conflictedIds.length === 0) return updated;
+            retryIds = conflictedIds;
+            // Make the writes that won searchable, so the next pass sees
+            // whether those rows still match and what to condition on. Even
+            // with "immediate" refresh a winner may not have refreshed yet.
+            await withRetry(() => client.indices.refresh({ index }));
+          }
+          throw new Error(
+            `updateMany on "${model}" updated ${updated} rows, but other requests kept changing the remaining matching rows through ${MAX_MANY_PASSES} passes`,
+          );
         },
         delete: async ({
           model,
@@ -575,7 +665,7 @@ export const elasticsearchAdapter = (
           // rerun until a pass meets none. Rows already deleted no longer
           // match, so a rerun never counts a row twice.
           let deleted = 0;
-          for (let pass = 0; pass < MAX_DELETE_MANY_PASSES; pass++) {
+          for (let pass = 0; pass < MAX_MANY_PASSES; pass++) {
             const result = await withRetry(() =>
               client.deleteByQuery({
                 index,
@@ -588,7 +678,7 @@ export const elasticsearchAdapter = (
             if (!result.version_conflicts) return deleted;
           }
           throw new Error(
-            `deleteMany on "${model}" deleted ${deleted} rows, but other requests kept changing matching rows; some may remain after ${MAX_DELETE_MANY_PASSES} passes`,
+            `deleteMany on "${model}" deleted ${deleted} rows, but other requests kept changing matching rows; some may remain after ${MAX_MANY_PASSES} passes`,
           );
         },
       };

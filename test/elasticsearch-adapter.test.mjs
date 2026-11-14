@@ -406,11 +406,8 @@ const concurrencyTestSuite = createTestSuite(
           expect(await adapter.count({ model: "session", where })).toBe(0);
           expect(deleted).toBe(rows.length);
         },
-      // Skipped until the maintainer decides how updateMany treats rows that
-      // change mid-update; see ticket 06. Today it skips a few of 200 rows.
       "updateMany updates every matching row when the rows change under it":
-        async ({ skip }) => {
-          skip("updateMany conflict handling is undecided (ticket 06)");
+        async () => {
           const userId = crypto.randomUUID();
           const rows = await createSessions(userId, 200);
           const where = [{ field: "userId", value: userId }];
