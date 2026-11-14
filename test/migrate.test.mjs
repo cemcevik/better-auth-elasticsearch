@@ -105,6 +105,8 @@ describe("migrate()", () => {
         where: [{ field: "id", value: user.id }],
       });
       expect(found?.email).toBe(user.email);
+      // Converted, not just reindexed: the row holds a number now.
+      expect(found?.score).toBe(Number(user.score));
     }
     // Numeric now: a range only a number mapping answers this way.
     const high = await adapter.count({
@@ -114,6 +116,68 @@ describe("migrate()", () => {
     expect(high).toBe(5);
     // The old index is kept as a rollback.
     expect(await client.indices.exists({ index: `${alias}_v1` })).toBe(true);
+  });
+
+  it("converts stored values to each changed field's new type", async () => {
+    const indexPrefix = uniquePrefix();
+    prefixes.push(indexPrefix);
+    const fields = (types) => ({
+      user: {
+        additionalFields: Object.fromEntries(
+          Object.entries(types).map(([name, type]) => [
+            name,
+            { type, required: false },
+          ]),
+        ),
+      },
+    });
+    const { adapter: before } = app(
+      indexPrefix,
+      fields({
+        toNumber: "string",
+        toText: "number",
+        toBoolean: "string",
+        toDate: "number",
+        untouched: "string",
+      }),
+    );
+    const stamp = Date.UTC(2026, 0, 2, 3, 4, 5);
+    const full = await before.create({
+      model: "user",
+      data: userData({
+        toNumber: "-12.5",
+        toText: 42,
+        toBoolean: "TRUE",
+        toDate: stamp,
+        untouched: "007",
+      }),
+    });
+    const empty = await before.create({ model: "user", data: userData() });
+    const { adapter, auth } = app(
+      indexPrefix,
+      fields({
+        toNumber: "number",
+        toText: "string",
+        toBoolean: "boolean",
+        toDate: "date",
+        untouched: "string",
+      }),
+    );
+
+    await migrate(auth);
+
+    const byId = (id) =>
+      adapter.findOne({ model: "user", where: [{ field: "id", value: id }] });
+    const converted = await byId(full.id);
+    expect(converted?.toNumber).toBe(-12.5);
+    expect(converted?.toText).toBe("42");
+    expect(converted?.toBoolean).toBe(true);
+    expect(converted?.toDate).toEqual(new Date(stamp));
+    expect(converted?.untouched).toBe("007");
+    // Missing values stay missing.
+    const blank = await byId(empty.id);
+    expect(blank?.toNumber ?? null).toBeNull();
+    expect(blank?.toBoolean ?? null).toBeNull();
   });
 
   it("leaves matching models alone and changes nothing when run again", async () => {
@@ -371,15 +435,20 @@ describe("migrate()", () => {
 
   it("leaves the model as it was when a row does not fit the new mapping", async () => {
     const { indexPrefix, adapter: running } = await populatedPrefix(2);
-    await running.create({
+    const misfit = await running.create({
       model: "user",
       data: userData({ score: "not a number" }),
     });
     const { auth } = app(indexPrefix, scoreAs("number"));
     const alias = `${indexPrefix}_user`;
 
-    await expect(migrate(auth)).rejects.toThrow(
+    const failure = migrate(auth);
+    await expect(failure).rejects.toThrow(
       new RegExp(`"${alias}_v1" is unchanged`),
+    );
+    // The error says which row and field to fix.
+    await expect(failure).rejects.toThrow(
+      `row "${misfit.id}": field "score" holds "not a number", which cannot be converted to double`,
     );
 
     expect(await backingIndices(alias)).toEqual([`${alias}_v1`]);

@@ -203,7 +203,8 @@ export const migrateAliasedIndex = async (
     );
   }
   const [from, properties] = current;
-  if (mappingDiff(expected, properties).changed.length === 0) return undefined;
+  const { changed } = mappingDiff(expected, properties);
+  if (changed.length === 0) return undefined;
 
   const to = `${alias}_v${(await highestVersion(client, alias)) + 1}`;
   await createVersionedIndex(client, to, expected, settings);
@@ -213,7 +214,12 @@ export const migrateAliasedIndex = async (
     // refreshed old index holds every row there is to copy.
     await client.indices.addBlock({ index: from, block: "write" });
     await client.indices.refresh({ index: from });
-    await copyRows(client, from, to);
+    await copyRows(
+      client,
+      from,
+      to,
+      Object.fromEntries(changed.map(({ name, to: type }) => [name, type])),
+    );
     await client.indices.updateAliases({
       actions: [
         { add: { index: to, alias, is_write_index: true } },
@@ -296,13 +302,89 @@ const escapeRegExp = (text: string) =>
   text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
- * Reindexes `from` into `to` as a background task, so a large index does not
- * outlast the client's request timeout, and fails on any row not copied.
+ * Painless that rewrites each changed field's stored value to its new type,
+ * so rows read back with the type the schema declares rather than the one
+ * they were written with. A value that has no faithful conversion fails the
+ * copy, naming the row, the field and the value. Missing and null values are
+ * left alone. Types with no conversion listed (such as an `object`) keep
+ * their value as is and leave Elasticsearch to accept or reject it.
  */
-const copyRows = async (client: Client, from: string, to: string) => {
+const CONVERT_SCRIPT = `
+for (def entry : params.fields.entrySet()) {
+  String field = entry.getKey();
+  String type = entry.getValue();
+  def value = ctx._source.get(field);
+  if (value == null) { continue; }
+  def converted = null;
+  if (type == 'keyword') {
+    if (value instanceof String) { converted = value; }
+    else if (value instanceof Number || value instanceof Boolean) { converted = String.valueOf(value); }
+  } else if (type == 'double') {
+    if (value instanceof Number) { converted = ((Number) value).doubleValue(); }
+    else if (value instanceof String) {
+      try { converted = Double.parseDouble(((String) value).trim()); } catch (NumberFormatException e) {}
+    }
+  } else if (type == 'long') {
+    if (value instanceof Integer || value instanceof Long) { converted = ((Number) value).longValue(); }
+    else if (value instanceof Number) {
+      double number = ((Number) value).doubleValue();
+      if (number == Math.rint(number)) { converted = (long) number; }
+    } else if (value instanceof String) {
+      try { converted = Long.parseLong(((String) value).trim()); } catch (NumberFormatException e) {}
+    }
+  } else if (type == 'boolean') {
+    if (value instanceof Boolean) { converted = value; }
+    else if (value instanceof String) {
+      String text = ((String) value).trim().toLowerCase();
+      if (text == 'true') { converted = true; } else if (text == 'false') { converted = false; }
+    }
+  } else if (type == 'date') {
+    if (value instanceof String) { converted = value; }
+    else if (value instanceof Number) { converted = Instant.ofEpochMilli(((Number) value).longValue()).toString(); }
+  } else {
+    converted = value;
+  }
+  if (converted == null) {
+    String shown = value instanceof String ? '"' + value + '"' : String.valueOf(value);
+    throw new IllegalArgumentException('row "' + ctx._id + '": field "' + field + '" holds ' + shown + ', which cannot be converted to ' + type);
+  }
+  ctx._source.put(field, converted);
+}
+`;
+
+/** The innermost reason of an Elasticsearch error cause chain. */
+const innermostReason = (
+  cause: { reason?: string | null; caused_by?: unknown } | undefined,
+): string | undefined => {
+  let reason: string | undefined;
+  let current = cause;
+  while (current) {
+    reason = current.reason ?? reason;
+    current = current.caused_by as typeof cause;
+  }
+  return reason;
+};
+
+/**
+ * Reindexes `from` into `to` as a background task, so a large index does not
+ * outlast the client's request timeout, converting the values of the fields
+ * in `convert` (field name to new mapping type) on the way. Fails on any row
+ * not copied.
+ */
+const copyRows = async (
+  client: Client,
+  from: string,
+  to: string,
+  convert: Record<string, string>,
+) => {
   const started = await client.reindex({
     source: { index: from },
     dest: { index: to, op_type: "create" },
+    script: {
+      lang: "painless",
+      source: CONVERT_SCRIPT,
+      params: { fields: convert },
+    },
     refresh: true,
     wait_for_completion: false,
   });
@@ -317,8 +399,8 @@ const copyRows = async (client: Client, from: string, to: string) => {
       | { failures?: { id?: string; cause?: { reason?: string } }[] }
       | undefined;
     const reason =
-      (status.error as { reason?: string } | undefined)?.reason ??
-      response?.failures?.[0]?.cause?.reason;
+      innermostReason(status.error) ??
+      innermostReason(response?.failures?.[0]?.cause);
     if (status.error || (response?.failures?.length ?? 0) > 0) {
       throw new Error(`Copying the rows failed: ${reason ?? "unknown error"}`);
     }
