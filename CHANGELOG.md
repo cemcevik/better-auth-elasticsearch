@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+### Changed
+
+- The package no longer ships its TypeScript sources and source maps, which
+  made up over half of its size. The compiled JavaScript and type
+  declarations are unchanged.
+
 ## 0.3.0
 
 ### Added
