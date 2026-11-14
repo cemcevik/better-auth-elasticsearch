@@ -407,10 +407,10 @@ const concurrencyTestSuite = createTestSuite(
           expect(deleted).toBe(rows.length);
         },
       // Skipped until the maintainer decides how updateMany treats rows that
-      // change mid-update; see ticket 05. Today it skips a few of 200 rows.
+      // change mid-update; see ticket 06. Today it skips a few of 200 rows.
       "updateMany updates every matching row when the rows change under it":
         async ({ skip }) => {
-          skip("updateMany conflict handling is undecided (ticket 05)");
+          skip("updateMany conflict handling is undecided (ticket 06)");
           const userId = crypto.randomUUID();
           const rows = await createSessions(userId, 200);
           const where = [{ field: "userId", value: userId }];
