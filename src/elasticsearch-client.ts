@@ -1,7 +1,14 @@
+// 409 is not retried: a version conflict on a create (duplicate id) or on a
+// sequence-number check fails the same way every time.
 const isRetriableStatus = (status?: number): boolean => {
   if (status === undefined) return false;
-  return status === 408 || status === 409 || status === 429 || status >= 500;
+  return status === 408 || status === 429 || status >= 500;
 };
+
+/** Elasticsearch's version conflict: a duplicate id or a stale write. */
+export const isVersionConflict = (error: unknown): boolean =>
+  (error as { meta?: { statusCode?: number } } | undefined)?.meta
+    ?.statusCode === 409;
 
 const isRetriableError = (error: unknown): boolean => {
   if (!(error instanceof Error)) return false;

@@ -28,6 +28,9 @@ export const auth = betterAuth({
     sessionRetentionDays: 30,
     verificationRetentionDays: 7,
     maxRetries: 3,
+    // "immediate" (default): every write is searchable on return.
+    // "wait_for": wait for the next scheduled refresh; less cluster load.
+    refresh: "immediate",
     number_of_shards: 1,
     number_of_replicas: 0,
   }),

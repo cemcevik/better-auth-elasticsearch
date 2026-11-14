@@ -233,4 +233,22 @@ describe("index layout and mappings", () => {
     });
     expect(Object.keys(aliases)).toEqual([`${indexPrefix}_members_v1`]);
   });
+
+  it("lowercases the alias of a model name with capitals", async () => {
+    const { indexPrefix, adapter } = freshAdapter({
+      user: { modelName: "teamMembers" },
+    });
+
+    const created = await adapter.create({ model: "user", data: userData() });
+
+    const aliases = await client.indices.getAlias({
+      name: `${indexPrefix}_teammembers`,
+    });
+    expect(Object.keys(aliases)).toEqual([`${indexPrefix}_teammembers_v1`]);
+    const found = await adapter.findOne({
+      model: "user",
+      where: [{ field: "id", value: created.id }],
+    });
+    expect(found?.email).toBe(created.email);
+  });
 });

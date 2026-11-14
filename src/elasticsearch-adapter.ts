@@ -7,7 +7,10 @@ import {
   createAdapterFactory,
 } from "better-auth/adapters";
 
-import { withElasticsearchRetry } from "./elasticsearch-client";
+import {
+  isVersionConflict,
+  withElasticsearchRetry,
+} from "./elasticsearch-client";
 import { ensureAliasedIndex, expectedProperties } from "./index-layout";
 import { whereToQuery } from "./where-to-query";
 
@@ -24,6 +27,14 @@ export interface ElasticAdapterConfig {
   sessionRetentionDays?: number;
   verificationRetentionDays?: number;
   maxRetries?: number;
+  /**
+   * When a write becomes searchable. "immediate" (the default) refreshes the
+   * index on every write, so the next request finds the row. "wait_for" waits
+   * for Elasticsearch's next scheduled refresh instead: slower writes, less
+   * load on the cluster. By-query writes (`updateMany`, `deleteMany`) always
+   * refresh immediately, as Elasticsearch cannot make them wait.
+   */
+  refresh?: "immediate" | "wait_for";
   number_of_shards?: number;
   number_of_replicas?: number;
 }
@@ -47,6 +58,7 @@ export const elasticsearchAdapter = (
   const sessionRetentionDays = config.sessionRetentionDays ?? 30;
   const verificationRetentionDays = config.verificationRetentionDays ?? 7;
   const maxRetries = config.maxRetries ?? 3;
+  const refresh = config.refresh === "wait_for" ? "wait_for" : true;
   const numberOfShards = config.number_of_shards ?? 1;
   const numberOfReplicas = config.number_of_replicas ?? 0;
 
@@ -69,8 +81,9 @@ export const elasticsearchAdapter = (
       const withRetry = <T>(operation: () => Promise<T>) =>
         withElasticsearchRetry(operation, maxRetries);
 
+      // Elasticsearch index and alias names must be lowercase.
       const indexForModel = (model: string) =>
-        prefix ? `${prefix}_${model}` : model;
+        (prefix ? `${prefix}_${model}` : model).toLowerCase();
 
       const putLifecyclePolicyIfNeeded = async (
         model: string,
@@ -140,6 +153,15 @@ export const elasticsearchAdapter = (
         return alias;
       };
 
+      // The factory passes `select` with schema field names; the document
+      // stores them under their database names.
+      const sourceFor = (model: string, select?: string[]) =>
+        select && select.length > 0
+          ? {
+              _source: select.map((field) => getFieldName({ model, field })),
+            }
+          : {};
+
       const queryFor = (model: string, where: CleanedWhere[] = []) =>
         whereToQuery(
           where.map((clause) => ({
@@ -168,15 +190,25 @@ export const elasticsearchAdapter = (
             id,
           };
 
-          await withRetry(() =>
-            client.index({
-              index,
-              id,
-              op_type: "create",
-              refresh: "wait_for",
-              document: source,
-            }),
-          );
+          try {
+            await withRetry(() =>
+              client.index({
+                index,
+                id,
+                op_type: "create",
+                refresh,
+                document: source,
+              }),
+            );
+          } catch (error) {
+            if (isVersionConflict(error)) {
+              throw new Error(
+                `duplicate key: a "${model}" row with id "${id}" already exists`,
+                { cause: error },
+              );
+            }
+            throw error;
+          }
 
           return source as T;
         },
@@ -198,7 +230,7 @@ export const elasticsearchAdapter = (
               index,
               query,
               size: 1,
-              ...(select && select.length > 0 ? { _source: select } : {}),
+              ...sourceFor(model, select),
             }),
           );
 
@@ -231,7 +263,7 @@ export const elasticsearchAdapter = (
               query,
               size: limit,
               ...(offset !== undefined ? { from: offset } : {}),
-              ...(select && select.length > 0 ? { _source: select } : {}),
+              ...sourceFor(model, select),
               ...(sortBy
                 ? {
                     sort: [
@@ -312,7 +344,7 @@ export const elasticsearchAdapter = (
               document: mergedDocument,
               if_seq_no: hit._seq_no,
               if_primary_term: hit._primary_term,
-              refresh: "wait_for",
+              refresh,
             }),
           );
 
@@ -358,6 +390,8 @@ export const elasticsearchAdapter = (
           model: string;
           where: CleanedWhere[];
         }) => {
+          // A singular delete needs something to pick the row by.
+          if (where.length === 0) return;
           const index = await ensureAlias(model);
           const query = queryFor(model, where);
 
@@ -373,7 +407,7 @@ export const elasticsearchAdapter = (
             client.delete({
               index,
               id: hitId,
-              refresh: "wait_for",
+              refresh,
             }),
           );
         },
