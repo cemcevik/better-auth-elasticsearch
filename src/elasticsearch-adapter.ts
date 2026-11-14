@@ -8,6 +8,7 @@ import {
 } from "better-auth/adapters";
 
 import { withElasticsearchRetry } from "./elasticsearch-client";
+import { whereToQuery } from "./where-to-query";
 
 type Primitive = string | number | boolean | Date | null;
 type SourceDoc = Record<
@@ -28,9 +29,6 @@ export interface ElasticAdapterConfig {
 
 const CORE_MODELS = ["user", "session", "account", "verification"] as const;
 
-const escapeWildcard = (value: string) =>
-  value.replace(/[\\*?]/g, (token) => `\\${token}`);
-
 const normalizeHit = (hit: {
   _id?: string;
   _source?: SourceDoc;
@@ -42,74 +40,6 @@ const normalizeHit = (hit: {
     id: (source.id as string | undefined) ?? documentId,
   };
 };
-
-function buildFilterClause(
-  field: string,
-  where: CleanedWhere,
-): Record<string, unknown> {
-  const operator = where.operator;
-  const value = where.value;
-
-  switch (operator) {
-    case "eq":
-      if (value === null) {
-        return { bool: { must_not: [{ exists: { field } }] } };
-      }
-      return { term: { [field]: value } };
-    case "ne":
-      if (value === null) {
-        return { exists: { field } };
-      }
-      return { bool: { must_not: [{ term: { [field]: value } }] } };
-    case "gt":
-      return { range: { [field]: { gt: value } } };
-    case "gte":
-      return { range: { [field]: { gte: value } } };
-    case "lt":
-      return { range: { [field]: { lt: value } } };
-    case "lte":
-      return { range: { [field]: { lte: value } } };
-    case "in":
-      return { terms: { [field]: Array.isArray(value) ? value : [value] } };
-    case "not_in":
-      return {
-        bool: {
-          must_not: [
-            { terms: { [field]: Array.isArray(value) ? value : [value] } },
-          ],
-        },
-      };
-    case "contains":
-      return {
-        wildcard: {
-          [field]: {
-            value: `*${escapeWildcard(String(value))}*`,
-            case_insensitive: true,
-          },
-        },
-      };
-    case "starts_with":
-      return {
-        wildcard: {
-          [field]: {
-            value: `${escapeWildcard(String(value))}*`,
-            case_insensitive: true,
-          },
-        },
-      };
-    case "ends_with":
-      return {
-        wildcard: {
-          [field]: {
-            value: `*${escapeWildcard(String(value))}`,
-            case_insensitive: true,
-          },
-        },
-      };
-    default:
-      return { term: { [field]: value } };
-  }
-}
 
 export const elasticsearchAdapter = (
   config: ElasticAdapterConfig,
@@ -250,48 +180,13 @@ export const elasticsearchAdapter = (
         return index;
       };
 
-      const whereToQuery = (model: string, where: CleanedWhere[] = []) => {
-        if (!where.length) {
-          return { match_all: {} };
-        }
-
-        const firstClause = where[0];
-        if (!firstClause) {
-          return { match_all: {} };
-        }
-
-        let expression = buildFilterClause(
-          getFieldName({ model, field: firstClause.field }),
-          firstClause,
+      const queryFor = (model: string, where: CleanedWhere[] = []) =>
+        whereToQuery(
+          where.map((clause) => ({
+            ...clause,
+            field: getFieldName({ model, field: clause.field }),
+          })),
         );
-
-        for (let index = 1; index < where.length; index += 1) {
-          const clause = where[index];
-          if (!clause) continue;
-          const nextExpression = buildFilterClause(
-            getFieldName({ model, field: clause.field }),
-            clause,
-          );
-
-          if (clause.connector === "OR") {
-            expression = {
-              bool: {
-                should: [expression, nextExpression],
-                minimum_should_match: 1,
-              },
-            };
-            continue;
-          }
-
-          expression = {
-            bool: {
-              must: [expression, nextExpression],
-            },
-          };
-        }
-
-        return expression;
-      };
 
       return {
         create: async <T extends Record<string, unknown>>({
@@ -336,7 +231,7 @@ export const elasticsearchAdapter = (
           join?: Record<string, unknown>;
         }) => {
           const index = await getIndex(model);
-          const query = whereToQuery(model, where);
+          const query = queryFor(model, where);
 
           const result = await withRetry(() =>
             client.search<SourceDoc>({
@@ -368,7 +263,7 @@ export const elasticsearchAdapter = (
           join?: Record<string, unknown>;
         }) => {
           const index = await getIndex(model);
-          const query = whereToQuery(model, where);
+          const query = queryFor(model, where);
 
           const result = await withRetry(() =>
             client.search<SourceDoc>({
@@ -405,7 +300,7 @@ export const elasticsearchAdapter = (
           where?: CleanedWhere[];
         }) => {
           const index = await getIndex(model);
-          const query = whereToQuery(model, where);
+          const query = queryFor(model, where);
 
           const result = await withRetry(() => client.count({ index, query }));
 
@@ -421,7 +316,7 @@ export const elasticsearchAdapter = (
           update: T;
         }) => {
           const index = await getIndex(model);
-          const query = whereToQuery(model, where);
+          const query = queryFor(model, where);
 
           const searchResult = await withRetry(() =>
             client.search<SourceDoc>({
@@ -473,7 +368,7 @@ export const elasticsearchAdapter = (
           update: Record<string, unknown>;
         }) => {
           const index = await getIndex(model);
-          const query = whereToQuery(model, where);
+          const query = queryFor(model, where);
 
           const params = {
             fields: update,
@@ -504,7 +399,7 @@ export const elasticsearchAdapter = (
           where: CleanedWhere[];
         }) => {
           const index = await getIndex(model);
-          const query = whereToQuery(model, where);
+          const query = queryFor(model, where);
 
           const searchResult = await withRetry(() =>
             client.search<SourceDoc>({ index, query, size: 1 }),
@@ -530,7 +425,7 @@ export const elasticsearchAdapter = (
           where: CleanedWhere[];
         }) => {
           const index = await getIndex(model);
-          const query = whereToQuery(model, where);
+          const query = queryFor(model, where);
 
           const result = await withRetry(() =>
             client.deleteByQuery({
