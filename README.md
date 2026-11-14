@@ -1,60 +1,159 @@
-# @cemcevik/better-auth-elasticsearch
+# better-auth-elasticsearch
 
-Elasticsearch adapter for Better Auth.
+[![npm](https://img.shields.io/npm/v/better-auth-elasticsearch)](https://www.npmjs.com/package/better-auth-elasticsearch)
+[![CI](https://github.com/cemcevik/better-auth-elasticsearch/actions/workflows/ci.yml/badge.svg)](https://github.com/cemcevik/better-auth-elasticsearch/actions/workflows/ci.yml)
+[![License](https://img.shields.io/npm/l/better-auth-elasticsearch)](LICENSE.md)
 
-## Install
+Elasticsearch database adapter for [Better Auth](https://www.better-auth.com).
+
+- Explicit mappings derived from your schema, including plugin fields
+- Schema migrations without downtime
+- Atomic one-time tokens and counters
+- No background work, safe on serverless
+
+## Installation
 
 ```bash
-pnpm add @cemcevik/better-auth-elasticsearch better-auth @elastic/elasticsearch
+npm install better-auth-elasticsearch better-auth @elastic/elasticsearch
 ```
 
-`better-auth` and `@elastic/elasticsearch` are peer dependencies.
+| Requirement              | Version                                  |
+| ------------------------ | ---------------------------------------- |
+| `better-auth`            | ≥ 1.7.23                                 |
+| Elasticsearch            | 8.19 or 9.x                              |
+| `@elastic/elasticsearch` | Same major as the server (8.x or 9.x)    |
+| Node.js                  | ≥ 22                                     |
 
 ## Usage
 
 ```ts
 import { Client } from "@elastic/elasticsearch";
 import { betterAuth } from "better-auth";
-import { elasticsearchAdapter } from "@cemcevik/better-auth-elasticsearch";
+import { elasticsearchAdapter } from "better-auth-elasticsearch";
 
-const client = new Client({
-  node: process.env.ELASTICSEARCH_URL!,
-});
+const client = new Client({ node: process.env.ELASTICSEARCH_URL });
 
 export const auth = betterAuth({
-  database: elasticsearchAdapter({
-    client,
-    indexPrefix: "better_auth",
-    sessionRetentionDays: 30,
-    verificationRetentionDays: 7,
-    maxRetries: 3,
-    number_of_shards: 1,
-    number_of_replicas: 0,
-  }),
+  database: elasticsearchAdapter({ client, indexPrefix: "auth" }),
+  emailAndPassword: { enabled: true },
 });
 ```
 
-## Development
+Indices are created on first use.
+
+### Options
+
+| Option                | Default       | Description                                                       |
+| --------------------- | ------------- | ----------------------------------------------------------------- |
+| `client`              | required      | An `@elastic/elasticsearch` client.                               |
+| `indexPrefix`         | `""`          | Prefix for alias and index names (`<prefix>_<model>`).            |
+| `refresh`             | `"immediate"` | `"immediate"` or `"wait_for"`. See [Refresh](#refresh).           |
+| `writeBlockTimeoutMs` | `30000`       | How long writes wait during a migration before failing.           |
+| `maxRetries`          | `3`           | Retries for transient errors (timeouts, 429, 5xx).                |
+| `numberOfShards`      | `1`           | Primary shards per index.                                         |
+| `numberOfReplicas`    | `0`           | Replicas per index.                                               |
+| `debugLogs`           | `false`       | Better Auth adapter debug logging.                                |
+
+### Refresh
+
+With the default `"immediate"`, every write is searchable as soon as it
+returns, which is what Better Auth expects. `"wait_for"` waits for the next
+scheduled refresh instead: slower writes, less cluster load. `deleteMany`
+always refreshes immediately.
+
+## Example
+
+[`examples/nextjs`](examples/nextjs) is a small Next.js app with email and
+password sign-up, sign-in and sign-out, an additional user field, and scripts
+for `migrate()` and `purgeExpired()`. It runs against the repository's Docker
+Compose Elasticsearch:
+
+```bash
+docker compose up -d --wait
+cd examples/nextjs
+pnpm adapter:install
+cp .env.example .env
+pnpm dev
+```
+
+## Index layout
+
+Each model is an alias (`auth_user`) over a versioned index (`auth_user_v1`).
+Mappings come from the Better Auth schema with dynamic mapping off:
+
+| Field type                 | Mapping                               |
+| -------------------------- | ------------------------------------- |
+| `string`, enums, arrays    | `keyword` (`ignore_above: 8191`)      |
+| `number`                   | `double`, or `long` for `bigint`      |
+| `boolean`                  | `boolean`                             |
+| `date`                     | `date`                                |
+| `json`                     | `object` (`enabled: false`)           |
+
+On first use the adapter adds new fields to the mapping and fails with a clear
+error if a field's type has changed. Run `migrate()` to apply the change.
+
+To review mappings in a pull request:
+
+```bash
+npx auth generate --output elasticsearch-mappings.json
+```
+
+## Migrations
+
+```ts
+import { migrate } from "better-auth-elasticsearch";
+
+const { migrated } = await migrate(auth);
+```
+
+For each model whose field types changed, `migrate()` creates the next index
+version, copies the data (converting values to the new types), and swaps the
+alias atomically. Reads continue throughout, and writes wait until the swap
+instead of failing. A value that cannot be converted rolls the migration back.
+
+The old index is kept for rollback; pass `{ deleteOldIndices: true }` to remove
+it. Running `migrate()` again is safe.
+
+## Purging expired rows
+
+Better Auth does not delete expired sessions on its own. Call `purgeExpired()`
+from a scheduled job:
+
+```ts
+import { purgeExpired } from "better-auth-elasticsearch";
+
+const { session, verification } = await purgeExpired(auth);
+```
+
+`migrate()` and `purgeExpired()` work in plain Node scripts.
+
+## Limitations
+
+- **Numeric ids** are not supported; ids are strings.
+- **Transactions** are not supported.
+- **Unique constraints** are enforced on `id` only. Other `unique` fields, such
+  as `email`, rely on Better Auth's own checks, which concurrent requests can
+  race.
+- **Joins** use Better Auth's fallback queries rather than native joins.
+
+## Contributing
 
 ```bash
 pnpm install
-pnpm lint
-pnpm test
-pnpm build
+docker compose up -d --wait   # Elasticsearch 9.5.5, user elastic / changeme
+ELASTICSEARCH_URL=http://127.0.0.1:9200 \
+ELASTICSEARCH_USERNAME=elastic \
+ELASTICSEARCH_PASSWORD=changeme \
+pnpm test:integration
 ```
 
-For integration tests:
+`pnpm check` runs lint, typecheck and unit tests. To test against 8.19, set
+`ES_VERSION=8.19.25` for Docker Compose and `ELASTICSEARCH_CLIENT_MAJOR=8` for
+the tests.
 
-```bash
-ELASTICSEARCH_URL=http://127.0.0.1:9200 BETTER_AUTH_FORCE_ELASTIC_TESTS=true pnpm test:integration
-```
-
-## CI / Release Flow
-
-- Push to `dev`: runs CI (Biome, typecheck, build, integration tests with Elasticsearch service).
-- Push to `main`: runs CI, bumps patch version, commits version bump, and publishes to npm.
-- Publish step is guarded to skip if the target version already exists on npm.
+Releases are published from `main` when the version in `package.json` is not
+yet on npm.
 
 ## License
 
-Apache-2.0
+[Apache-2.0](LICENSE.md)

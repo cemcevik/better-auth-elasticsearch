@@ -1,0 +1,33 @@
+# Single-node Elasticsearch for the integration tests, shared by contributors
+# and CI. Basic auth is on (user `elastic`), TLS and Kibana are off.
+#
+#   docker compose up -d --wait
+#
+# Override the server version, password or host port with ES_VERSION,
+# ELASTIC_PASSWORD or ES_PORT. The supported servers are 9.x (the default) and
+# 8.19; test 8.19 with the 8.x client (ELASTICSEARCH_CLIENT_MAJOR=8):
+#
+#   ES_VERSION=8.19.25 ES_PORT=9208 docker compose -p adapter-es8 up -d --wait
+services:
+  elasticsearch:
+    image: elasticsearch:${ES_VERSION:-9.5.5}
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "false"
+      xpack.security.transport.ssl.enabled: "false"
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD:-changeme}
+      # Keep a nearly full Docker disk from turning indices read-only.
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+    ports:
+      - 127.0.0.1:${ES_PORT:-9200}:9200
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fs -u elastic:$$ELASTIC_PASSWORD
+          "http://localhost:9200/_cluster/health?wait_for_status=yellow&timeout=5s"
+      interval: 5s
+      timeout: 10s
+      retries: 60

@@ -1,67 +1,80 @@
 name: Release
 
+# Publishes to npm when a push to main carries a version that is not on npm
+# yet. The version is set by hand in package.json; a merge that leaves it
+# unchanged (documentation, CI, tests) publishes nothing.
+
 on:
   push:
     branches:
       - main
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  check:
+    name: Check whether the version is new
     runs-on: ubuntu-latest
-    services:
-      elasticsearch:
-        image: docker.elastic.co/elasticsearch/elasticsearch:9.3.1
-        env:
-          discovery.type: single-node
-          xpack.security.enabled: "false"
-          ES_JAVA_OPTS: -Xms512m -Xmx512m
-        ports:
-          - 9200:9200
-        options: >-
-          --health-cmd="curl -fs http://localhost:9200/_cluster/health || exit 1"
-          --health-interval=10s
-          --health-timeout=10s
-          --health-retries=30
-
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+      - name: Compare with npm
+        id: version
+        run: |
+          name="$(node -p 'require("./package.json").name')"
+          version="$(node -p 'require("./package.json").version')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if output="$(npm view "$name@$version" version 2>&1)"; then
+            if [ -n "$output" ]; then
+              echo "$name@$version is already on npm; nothing to publish."
+              echo "publish=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          elif ! grep -q E404 <<< "$output"; then
+            # Any failure other than "not found" must not lead to a publish.
+            echo "$output" >&2
+            exit 1
+          fi
+          echo "$name@$version is not on npm yet; publishing."
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+  ci:
+    name: CI
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish ${{ needs.check.outputs.version }}
+    needs: [check, ci]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v6
         with:
-          node-version: "24.x"
-          registry-url: "https://registry.npmjs.org"
+          # npm trusted publishing (OIDC) needs the npm 11 that ships with
+          # Node 24.
+          node-version: 24
+          registry-url: https://registry.npmjs.org
           cache: pnpm
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-      - name: Lint
-        run: pnpm lint
-      - name: Typecheck
-        run: pnpm typecheck
+        run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Build
         run: pnpm build
-      - name: Integration tests
-        env:
-          ELASTICSEARCH_URL: http://127.0.0.1:9200
-          BETTER_AUTH_FORCE_ELASTIC_TESTS: "true"
-        run: pnpm test:integration
-      - name: Configure git
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-      - name: Bump patch version
-        run: pnpm version patch --no-git-tag-version
-      - name: Format package.json
-        run: pnpm format package.json
-      - name: Commit version bump
-        run: |
-          git add package.json
-          git commit -m "chore: bump version [skip ci]"
-          git push
+      # npm uses trusted publishing when the package has it configured, and
+      # falls back to the NPM_TOKEN secret otherwise (as on a first publish).
       - name: Publish to npm
-        run: pnpm publish  --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm publish --provenance --access public --no-git-checks

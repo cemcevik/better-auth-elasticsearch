@@ -1,7 +1,25 @@
 {
-  "name": "@cemcevik/better-auth-elasticsearch",
-  "version": "0.1.8",
-  "description": "Elasticsearch adapter for Better Auth",
+  "name": "better-auth-elasticsearch",
+  "version": "0.2.0",
+  "description": "Elasticsearch database adapter for Better Auth",
+  "keywords": [
+    "better-auth",
+    "better-auth-adapter",
+    "elasticsearch",
+    "adapter",
+    "auth",
+    "database"
+  ],
+  "homepage": "https://github.com/cemcevik/better-auth-elasticsearch#readme",
+  "bugs": {
+    "url": "https://github.com/cemcevik/better-auth-elasticsearch/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cemcevik/better-auth-elasticsearch.git"
+  },
+  "license": "Apache-2.0",
+  "author": "cemcevik",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -11,43 +29,39 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": ["dist", "src"],
+  "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.es8.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:integration": "BETTER_AUTH_FORCE_ELASTIC_TESTS=true vitest run test/elasticsearch-adapter.test.mjs",
+    "test:integration": "BETTER_AUTH_FORCE_ELASTIC_TESTS=true vitest run test/elasticsearch-adapter.test.mjs test/mappings.test.mjs test/migrate.test.mjs test/purge.test.mjs",
     "lint": "biome check .",
     "lint:fix": "biome check . --write",
     "format": "biome format . --write",
     "check": "pnpm lint && pnpm typecheck && pnpm test"
   },
-  "keywords": ["better-auth", "elasticsearch", "adapter", "auth"],
-  "author": "cemcevik",
-  "license": "Apache-2.0",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/cemcevik/better-auth-elasticsearch.git"
-  },
-  "homepage": "https://github.com/cemcevik/better-auth-elasticsearch#readme",
   "engines": {
     "node": ">=22"
   },
   "peerDependencies": {
-    "@elastic/elasticsearch": "^9.3.4",
-    "better-auth": "^1.4.21"
+    "@elastic/elasticsearch": "^8.19.0 || ^9.0.0",
+    "better-auth": "^1.7.23"
   },
   "devDependencies": {
+    "@better-auth/test-utils": "1.7.23",
     "@biomejs/biome": "^1.9.4",
-    "@types/node": "^24.8.1",
-    "@elastic/elasticsearch": "^9.3.4",
-    "better-auth": "1.4.21",
+    "@elastic/elasticsearch": "^9.5.1",
+    "@elastic/elasticsearch-8": "npm:@elastic/elasticsearch@8.19.2",
+    "@types/node": "^24.19.2",
+    "better-auth": "1.7.23",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "vite": "^8.3.6",
+    "vitest": "^4.1.12"
   },
   "publishConfig": {
     "access": "public"
   },
-  "packageManager": "pnpm@10.11.1"
+  "packageManager": "pnpm@10.34.9"
 }
