@@ -53,15 +53,17 @@ jobs:
           cache: pnpm
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Lint
+        run: pnpm lint
+      # Runs after Lint because pnpm add rewrites package.json in a format
+      # Biome rejects. Also runs on manual dispatch, to check on demand.
       # The 7-day package age rule is off here: a fresh better-auth may pull in
       # fresh dependencies, and this run must fail only on contract changes.
       - name: Use the newest better-auth
-        if: github.event_name == 'schedule'
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         run: >-
           pnpm add --save-dev --ignore-scripts --config.minimum-release-age=0
           better-auth@latest @better-auth/test-utils@latest
-      - name: Lint
-        run: pnpm lint
       - name: Typecheck
         run: pnpm typecheck
       - name: Build
